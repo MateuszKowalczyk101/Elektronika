@@ -21,6 +21,7 @@ Wymagania:
 
 Uruchomienie:
     python geiger_gui.py
+    (instalacja krok po kroku i budowanie .exe: README.md)
 
 Uwagi sprzetowe (USB-6210):
     - GM daje impulsy o czasie martwym rzedu ~100 us, wiec software'owe odpytywanie
@@ -343,6 +344,12 @@ NIEPEWNOSCI - sciaga
 """
 
 
+def _resource_path(rel: str) -> str:
+    """Sciezka do pliku z assets/ - dziala tez w .exe z PyInstallera (pliki rozpakowane do _MEIPASS)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
+
+
 def _default_font_family() -> str:
     """Ladna czcionka natywna per system (Tk sam podmieni, jesli brak)."""
     if sys.platform.startswith("win"):
@@ -361,6 +368,12 @@ class DAQCounterApp(tk.Tk):
         self.minsize(980, 620)
 
         self.font_family = _default_font_family()
+
+        try:
+            self._icon_img = tk.PhotoImage(file=_resource_path(os.path.join("assets", "geiger.png")))
+            self.iconphoto(True, self._icon_img)
+        except Exception:
+            pass  # brak pliku ikony nie moze blokowac programu
 
         # --- MOTYW (tylko GUI) ---
         self.ui = {
@@ -487,8 +500,8 @@ class DAQCounterApp(tk.Tk):
         self._dt_data = {}                # key -> (N, t)
         self._dt_result = None            # (tau_s, u_tau_s) albo None
 
-        # co ile ms odpytywac licznik (histogram potrzebuje gestszego)
-        self._poll_ms = 100
+        self._hist_total = 0
+        self._hist_after_id = None
 
         # lista wykrytych kart NI
         self.daq_info = tk.StringVar(value="")
@@ -723,12 +736,14 @@ class DAQCounterApp(tk.Tk):
     # Timery / dzwiek / czas
     # ---------------------------------------------------------------
     def _cancel_update_timer(self):
-        if self._after_update_id is not None:
-            try:
-                self.after_cancel(self._after_update_id)
-            except Exception:
-                pass
-            self._after_update_id = None
+        for attr in ("_after_update_id", "_hist_after_id"):
+            after_id = getattr(self, attr, None)
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
     def _cancel_series_timer(self):
         if self._after_series_id is not None:
@@ -1721,6 +1736,7 @@ class DAQCounterApp(tk.Tk):
 
         self._hist_counts = []
         self._hist_T = T
+        self._hist_total = k
         self._hist_next = T
         self._hist_last_n = 0
         self._hist_skipped = 0
@@ -1733,28 +1749,58 @@ class DAQCounterApp(tk.Tk):
         if not self._start_run_internal(from_series=False, override_time_s=k * T):
             self.hist_active = False
             return
+        self._hist_schedule()
         self.status.set(f"Histogram: {k} przedzialow po {_fmt_pl(T, 2)} s "
                         f"(razem {_fmt_pl(k * T / 60.0, 1)} min)...")
 
-    def _hist_tick(self, t: float, counts: int):
-        """Wolane przy kazdym odczycie: zamyka przedzial, gdy minela jego granica."""
-        T = self._hist_T
-        if t < self._hist_next:
+    # Granice przedzialow musza byc trafione co do milisekund: przedzialy o roznej dlugosci
+    # sztucznie poszerzaja rozklad (timer Tk na Windows ma rozrzut ~16 ms). Dlatego budzimy sie
+    # troche przed granica i czekamy aktywnie dokladnie do niej.
+    HIST_WAKE_EARLY_S = 0.04
+    HIST_MAX_LATE_S = 0.005
+
+    def _hist_schedule(self):
+        now = time.perf_counter() - self.start_perf
+        delay_ms = int((self._hist_next - now - self.HIST_WAKE_EARLY_S) * 1000)
+        self._hist_after_id = self.after(max(1, delay_ms), self._hist_boundary)
+
+    def _hist_boundary(self):
+        self._hist_after_id = None
+        if self._closing or not self.running or not self.hist_active:
             return
-        if t >= self._hist_next + T:
-            # program sie przycial i przeskoczyl granice - ten i nastepny przedzial maja zla dlugosc
+        target = self.start_perf + self._hist_next
+        while time.perf_counter() < target:
+            pass
+        late = time.perf_counter() - target
+        try:
+            counts = self._read_counts()
+        except Exception as e:
+            self._on_read_error(e)
+            return
+
+        if late > self.HIST_MAX_LATE_S:
+            # spoznione odczytanie: ten przedzial jest za dlugi, a nastepny bedzie za krotki
             self._hist_skipped += 1
-            self._hist_next = (math.floor(t / T) + 1) * T
             self._hist_discard_next = True
         elif self._hist_discard_next:
             self._hist_skipped += 1
-            self._hist_next += T
             self._hist_discard_next = False
         else:
             self._hist_counts.append(counts - self._hist_last_n)
-            self._hist_next += T
         self._hist_last_n = counts
+        self._hist_next += self._hist_T
+
+        if self.plot_live.get():
+            self._plot_point(time.perf_counter() - self.start_perf, counts)
         self._redraw_hist()
+
+        if len(self._hist_counts) + self._hist_skipped >= self._hist_total:
+            self._last_counts = counts
+            self._last_t = self._hist_total * self._hist_T
+            self.running = False
+            self._finalize_measurement("Zakonczono (histogram).", ended_normally=True)
+            return
+        self._hist_schedule()
 
     def _hist_summary(self):
         v = self._hist_counts
@@ -2658,6 +2704,8 @@ class DAQCounterApp(tk.Tk):
                 return False
 
         self.start_perf = time.perf_counter()
+        if self.use_simulator.get():
+            self._sim_last_t = self.start_perf   # jak karta: zliczamy od startu, nie od pierwszego odczytu
         self.running = True
         self._set_controls_locked(True)
         self._start_click_pump()
@@ -2667,9 +2715,7 @@ class DAQCounterApp(tk.Tk):
         else:
             self.status.set("Pomiar trwa...")
 
-        # histogram: granice przedzialow musza byc trafione dokladnie, wiec odpytujemy czesciej
-        self._poll_ms = 20 if self.hist_active else 100
-        self._after_update_id = self.after(self._poll_ms, self._update)
+        self._after_update_id = self.after(100, self._update)
         return True
 
     def stop_measurement(self):
@@ -2820,11 +2866,7 @@ class DAQCounterApp(tk.Tk):
         try:
             counts = self._read_counts()
         except Exception as e:
-            messagebox.showerror("Blad", f"Blad odczytu:\n{e}")
-            self.running = False
-            if self.series_active:
-                self.series_active = False
-            self._finalize_measurement("Blad odczytu.", ended_normally=False)
+            self._on_read_error(e)
             return
 
         t = time.perf_counter() - self.start_perf
@@ -2839,18 +2881,11 @@ class DAQCounterApp(tk.Tk):
         self._last_counts = counts
         self._last_t = t
 
-        if self.plot_live.get():
+        # w histogramie wykres rysuje _hist_boundary (zaraz po granicy przedzialu),
+        # zeby rysowanie nie opoznilo odczytu na granicy
+        if self.plot_live.get() and not self.hist_active:
             if (t - self._last_plot_t) >= (self.plot_interval_ms / 1000.0):
-                self._t_points.append(t)
-                self._n_points.append(counts)
-                try:
-                    self.line.set_data(self._t_points, self._n_points)
-                    self.ax.relim()
-                    self.ax.autoscale_view()
-                    self.canvas.draw_idle()
-                except Exception:
-                    pass
-                self._last_plot_t = t
+                self._plot_point(t, counts)
 
         self.current_counts.set(counts)
         self.elapsed_time.set(round(t, 3))
@@ -2876,21 +2911,38 @@ class DAQCounterApp(tk.Tk):
                 self._log_row(run_idx, t, counts)
                 self._last_log_t = t
 
-        if self.hist_active:
-            self._hist_tick(t, counts)
-
-        # warunki zakonczenia runa
-        if self.mode.get() == "time" and self.target_time_s and t >= self.target_time_s:
+        # warunki zakonczenia runa (histogram konczy _hist_boundary po ostatnim przedziale)
+        if (self.mode.get() == "time" and self.target_time_s and t >= self.target_time_s
+                and not self.hist_active):
             self.running = False
             self._finalize_measurement("Zakonczono (uplynal czas).", ended_normally=True)
             return
 
-        if self.mode.get() == "counts" and counts >= self.target_counts.get():
+        if self.mode.get() == "counts" and counts >= self.target_counts.get() and not self.hist_active:
             self.running = False
             self._finalize_measurement("Zakonczono (osiagnieto N).", ended_normally=True)
             return
 
-        self._after_update_id = self.after(self._poll_ms, self._update)
+        self._after_update_id = self.after(100, self._update)
+
+    def _plot_point(self, t: float, counts: int):
+        self._t_points.append(t)
+        self._n_points.append(counts)
+        try:
+            self.line.set_data(self._t_points, self._n_points)
+            self.ax.relim()
+            self.ax.autoscale_view()
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+        self._last_plot_t = t
+
+    def _on_read_error(self, e: Exception):
+        messagebox.showerror("Blad", f"Blad odczytu:\n{e}")
+        self.running = False
+        if self.series_active:
+            self.series_active = False
+        self._finalize_measurement("Blad odczytu.", ended_normally=False)
 
     # ---------------------------------------------------------------
     # RESET / TASK / CLOSE
