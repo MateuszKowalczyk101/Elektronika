@@ -1,5 +1,9 @@
 # Elektronika
 
+Glowna aplikacja: **`geiger_gui.py`** - GUI do licznika Geigera-Mullera z karta NI USB-6210
+(pomiar pojedynczy i serie, plateau, zanik z dopasowaniem t1/2, korekta czasu martwego, CSV,
+wykres N(t), tryb symulatora). Uruchomienie: `python geiger_gui.py`.
+
 ## Instalacja
 
 Potrzebne sa **dwie** rozne rzeczy:
@@ -24,7 +28,7 @@ W Anaconda Prompt, w folderze ze skryptem i ikona `app.ico` (najlepiej na dysku 
 
 ```
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --icon=app.ico --name="GeigerApp" app.py
+python -m PyInstaller --onefile --windowed --icon=app.ico --name="GeigerApp" geiger_gui.py
 ```
 
 Gotowy plik: `dist\GeigerApp.exe` - skopiuj go (albo skrot do niego) na pulpit.
