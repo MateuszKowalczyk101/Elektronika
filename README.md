@@ -7,6 +7,9 @@ wykres N(t), tryb symulatora). Uruchomienie: `python geiger_gui.py`.
 Dla studentow: wynik od razu z niepewnoscia (np. `CPS = 0,312 ± 0,025`), zapamietywanie tla
 i wynik netto, podpowiedzi po najechaniu mysza, instrukcja cwiczenia pod **F1**.
 
+Cwiczenia: statystyka (histogram z rozkladem Poissona i testem chi²), plateau, zanik (t1/2 z
+niepewnoscia, dopasowanie wazone), czas martwy metoda dwoch zrodel.
+
 ## Instalacja
 
 Potrzebne sa **dwie** rozne rzeczy:

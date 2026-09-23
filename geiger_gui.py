@@ -85,6 +85,138 @@ def _fmt_unc(value: float, err: float, integer: bool = False) -> str:
     return f"{_fmt_pl(value, decimals)} ± {_fmt_pl(err, decimals)}"
 
 
+# czas martwy symulowanego licznika (typowy GM) - zeby metoda dwoch zrodel dzialala tez w symulatorze
+SIM_DEAD_TIME_S = 100e-6
+
+
+# ---------------------------------------------------------------
+# MATEMATYKA (bez numpy/scipy - tylko biblioteka standardowa)
+# ---------------------------------------------------------------
+def _poisson_pmf(k: int, mean: float) -> float:
+    if mean <= 0:
+        return 1.0 if k == 0 else 0.0
+    return math.exp(k * math.log(mean) - mean - math.lgamma(k + 1))
+
+
+def _chi2_sf(chi2: float, dof: int) -> float:
+    """P(X >= chi2) dla rozkladu chi^2 o dof stopniach swobody (Q(dof/2, chi2/2))."""
+    a, x = dof / 2.0, chi2 / 2.0
+    if x <= 0:
+        return 1.0
+    log_pre = -x + a * math.log(x) - math.lgamma(a)
+    if x < a + 1.0:
+        term = total = 1.0 / a
+        ap = a
+        for _ in range(1000):
+            ap += 1.0
+            term *= x / ap
+            total += term
+            if abs(term) < abs(total) * 1e-14:
+                break
+        return max(0.0, 1.0 - total * math.exp(log_pre))
+    tiny = 1e-300
+    b = x + 1.0 - a
+    c = 1.0 / tiny
+    d = 1.0 / b
+    h = d
+    for i in range(1, 1000):
+        an = -i * (i - a)
+        b += 2.0
+        d = an * d + b
+        d = tiny if abs(d) < tiny else d
+        c = b + an / c
+        c = tiny if abs(c) < tiny else c
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-14:
+            break
+    return min(1.0, math.exp(log_pre) * h)
+
+
+def _poisson_chi2(values):
+    """Test chi^2 zgodnosci z rozkladem Poissona o sredniej z danych.
+    Laczy sasiednie klasy, az oczekiwana liczebnosc >= 5. Zwraca (chi2, dof, p) albo None."""
+    m_count = len(values)
+    if m_count < 10:
+        return None
+    mean = sum(values) / m_count
+    if mean <= 0:
+        return None
+    k_max = max(max(values), int(mean + 6 * math.sqrt(mean) + 5))
+    obs = [0] * (k_max + 1)
+    for v in values:
+        obs[v] += 1
+    exp_ = [m_count * _poisson_pmf(k, mean) for k in range(k_max + 1)]
+    exp_[-1] += max(0.0, m_count - sum(exp_))   # ogon k > k_max do ostatniej klasy
+
+    bins, o_acc, e_acc = [], 0, 0.0
+    for o, e in zip(obs, exp_):
+        o_acc += o
+        e_acc += e
+        if e_acc >= 5.0:
+            bins.append([o_acc, e_acc])
+            o_acc, e_acc = 0, 0.0
+    if bins and (o_acc or e_acc):
+        bins[-1][0] += o_acc
+        bins[-1][1] += e_acc
+    dof = len(bins) - 2          # -1 za sume, -1 za srednia wyznaczona z danych
+    if dof < 1:
+        return None
+    chi2 = sum((o - e) ** 2 / e for o, e in bins)
+    return chi2, dof, _chi2_sf(chi2, dof)
+
+
+def _weighted_line_fit(xs, ys, sigmas):
+    """Prosta y = a + b*x metoda najmniejszych kwadratow z wagami 1/sigma^2.
+    Zwraca (a, b, u_b, chi2) albo None."""
+    w = [1.0 / (s * s) for s in sigmas]
+    s0 = sum(w)
+    sx = sum(wi * x for wi, x in zip(w, xs))
+    sy = sum(wi * y for wi, y in zip(w, ys))
+    sxx = sum(wi * x * x for wi, x in zip(w, xs))
+    sxy = sum(wi * x * y for wi, x, y in zip(w, xs, ys))
+    delta = s0 * sxx - sx * sx
+    if delta <= 0:
+        return None
+    b = (s0 * sxy - sx * sy) / delta
+    a = (sxx * sy - sx * sxy) / delta
+    u_b = math.sqrt(s0 / delta)
+    chi2 = sum(wi * (y - a - b * x) ** 2 for wi, x, y in zip(w, xs, ys))
+    return a, b, u_b, chi2
+
+
+def _two_source_tau(r1: float, r2: float, r12: float, rb: float = 0.0):
+    """Czas martwy [s] metoda dwoch zrodel (wzor z tlem, Knoll). None gdy dane nie pozwalaja."""
+    x = r1 * r2 - rb * r12
+    y = r1 * r2 * (r12 + rb) - rb * r12 * (r1 + r2)
+    if x <= 0 or y <= 0:
+        return None
+    z = y * (r1 + r2 - r12 - rb) / (x * x)
+    if z > 1.0:
+        return None
+    return x * (1.0 - math.sqrt(1.0 - z)) / y
+
+
+def _two_source_tau_unc(rates, uncs):
+    """(tau, u_tau) z propagacja niepewnosci przez pochodne numeryczne. rates = (r1, r2, r12, rb)."""
+    tau = _two_source_tau(*rates)
+    if tau is None:
+        return None
+    var = 0.0
+    for i, u in enumerate(uncs):
+        if u <= 0:
+            continue
+        h = max(abs(rates[i]) * 1e-6, 1e-9)
+        up = list(rates); up[i] += h
+        dn = list(rates); dn[i] -= h
+        t_up, t_dn = _two_source_tau(*up), _two_source_tau(*dn)
+        if t_up is None or t_dn is None:
+            return tau, float("inf")
+        var += ((t_up - t_dn) / (2 * h) * u) ** 2
+    return tau, math.sqrt(var)
+
+
 class ToolTip:
     """Dymek z podpowiedzia po najechaniu mysza na widget."""
 
@@ -159,8 +291,12 @@ Najedz mysza na pole lub przycisk, zeby zobaczyc podpowiedz.
      do schowka (np. do sprawozdania).
 
 3. STATYSTYKA (rozklad Poissona)
-   - Zakladka "Seria": np. 10 runow po 20 s.
-   - Porownaj rozrzut CPS miedzy runami z niepewnoscia sqrt(N)/t pojedynczego runu.
+   - Zakladka "Statystyka": np. 100 przedzialow po 1 s. "Start histogramu".
+   - Dobierz dlugosc przedzialu (albo odleglosc zrodla), zeby srednio bylo 5-20 zliczen
+     na przedzial - wtedy dobrze widac, ze rozklad nie jest symetryczny jak Gauss.
+   - Program rysuje histogram, punkty rozkladu Poissona i krzywa Gaussa, a pod spodem:
+       * odchylenie standardowe s porownane z sqrt(sredniej) - dla Poissona powinny byc podobne,
+       * test chi^2: p >= 0,05 -> dane zgodne z rozkladem Poissona.
 
 4. PLATEAU LICZNIKA
    - Zakladka "Plateau". Zacznij od niskiego napiecia WN i zwiekszaj co 20-25 V.
@@ -172,12 +308,23 @@ Najedz mysza na pole lub przycisk, zeby zobaczyc podpowiedz.
 5. ZANIK (tylko zrodla krotkozyciowe)
    - Zakladka "Zanik": wpisz tlo (wypelnia sie samo po kroku 1).
    - Rodzaj pomiaru "Zanik", START. Parametry (liczba runow, przerwa, czas) sa z zakladki "Seria".
-   - Program dopasowuje prosta do ln(CPS - tlo) i podaje t1/2.
+   - Program dopasowuje prosta do ln(CPS - tlo), wazac punkty ich niepewnoscia,
+     i podaje t1/2 z niepewnoscia.
    - Cs-137 ma t1/2 = 30 lat - jego zaniku w laboratorium nie zmierzysz.
+     Typowe zrodlo do tego cwiczenia to Ba-137m (t1/2 ok. 2,6 min, z generatora izotopow):
+     np. 15-20 runow po 20-30 s bez przerwy.
 
-6. ZAPIS WYNIKOW
+6. CZAS MARTWY (metoda dwoch zrodel)
+   - Potrzebne dwa silne zrodla (setki-tysiace CPS kazde).
+   - Zakladka "Czas martwy": zmierz kolejno  1) zrodlo 1,  2) oba zrodla,  3) zrodlo 2.
+     Zrodla NIE moga sie przesuwac miedzy pomiarami (zmienilaby sie geometria).
+   - Przez straty w czasie martwym R(1+2) < R1 + R2 - tlo. Program liczy z tego tau
+     z niepewnoscia. "Uzyj tau w korekcie" wpisuje wynik do zakladki "Urzadzenie".
+   - Jesli tau wychodzi w granicach niepewnosci zera (albo ujemne), zrodla sa za slabe.
+
+7. ZAPIS WYNIKOW
    - CSV z pomiarow: zakladka "Zapis" (wlacz PRZED pomiarem).
-   - Plateau i zanik: przyciski "Eksport CSV" i "Zapisz PNG" w zakladkach.
+   - Statystyka, plateau i zanik: przyciski "Eksport CSV" i "Zapisz PNG" w zakladkach.
    - Wykres N(t): "Zapisz PNG" nad wykresem.
 
 
@@ -190,7 +337,9 @@ NIEPEWNOSCI - sciaga
    - Jesli CPS netto jest mniejsze niz ok. 2 niepewnosci, zrodla nie da sie
      odroznic od tla - zmierz dluzej albo zbliz zrodlo.
    - Czas martwy tau (zakladka "Urzadzenie"): przy duzych tempach licznik gubi
-     impulsy. Poprawione tempo: CPS / (1 - CPS * tau). Dla GM zwykle tau ~ 100 us.
+     impulsy. Poprawione tempo: CPS / (1 - CPS * tau). Dla GM zwykle tau ~ 100 us
+     (zmierz je w zakladce "Czas martwy").
+   - Zanik: u(t1/2) = t1/2 * u(lambda) / lambda.
 """
 
 
@@ -318,8 +467,28 @@ class DAQCounterApp(tk.Tk):
         self._decay_cps = []
         self._decay_n = []
         self._decay_dt = []
-        self._decay_fit = None            # (lambda, t_half) albo None
+        self._decay_fit = None            # (lambda, u_lambda, t_half, u_t_half) albo None
         self._decay_bg_used = 0.0
+
+        # HISTOGRAM (statystyka zliczen)
+        self.hist_intervals = tk.IntVar(value=100)
+        self.hist_interval_s = tk.DoubleVar(value=1.0)
+        self.hist_active = False
+        self._hist_counts = []
+        self._hist_T = 1.0
+        self._hist_next = 1.0
+        self._hist_last_n = 0
+        self._hist_skipped = 0
+        self._hist_discard_next = False
+
+        # CZAS MARTWY (metoda dwoch zrodel)
+        self.dt_meas_s = tk.DoubleVar(value=60.0)
+        self._dt_active_key = None
+        self._dt_data = {}                # key -> (N, t)
+        self._dt_result = None            # (tau_s, u_tau_s) albo None
+
+        # co ile ms odpytywac licznik (histogram potrzebuje gestszego)
+        self._poll_ms = 100
 
         # lista wykrytych kart NI
         self.daq_info = tk.StringVar(value="")
@@ -394,9 +563,12 @@ class DAQCounterApp(tk.Tk):
                            command=lambda: self._save_figure_png(self.pl_fig, "plateau"))
         m_file.add_command(label="Zapisz wykres zaniku (PNG)...",
                            command=lambda: self._save_figure_png(self.dec_fig, "zanik"))
+        m_file.add_command(label="Zapisz histogram (PNG)...",
+                           command=lambda: self._save_figure_png(self.hist_fig, "histogram"))
         m_file.add_separator()
         m_file.add_command(label="Eksport plateau (CSV)...", command=self.export_plateau_csv)
         m_file.add_command(label="Eksport zaniku (CSV)...", command=self.export_decay_csv)
+        m_file.add_command(label="Eksport histogramu (CSV)...", command=self.export_hist_csv)
         m_file.add_separator()
         m_file.add_command(label="Zakoncz", command=self.on_close)
         menubar.add_cascade(label="Plik", menu=m_file)
@@ -457,7 +629,7 @@ class DAQCounterApp(tk.Tk):
 
         # Notebook (zakladki)
         style.configure("TNotebook", background=self.ui["bg"], borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(12, 6), background=self.ui["panel"])
+        style.configure("TNotebook.Tab", padding=(8, 5), background=self.ui["panel"])
         style.map("TNotebook.Tab",
                   background=[("selected", self.ui["card"])],
                   foreground=[("selected", self.ui["text"])])
@@ -772,10 +944,10 @@ class DAQCounterApp(tk.Tk):
         ttk.Separator(frame_results, orient="horizontal").grid(
             row=6, column=0, columnspan=3, sticky="ew", padx=8, pady=(2, 4))
         self.lbl_result = ttk.Label(frame_results, textvariable=self.result_text, style="Result.TLabel",
-                                    wraplength=460, justify="left")
+                                    wraplength=600, justify="left")
         self.lbl_result.grid(row=7, column=0, columnspan=3, sticky="w", padx=8)
         ttk.Label(frame_results, textvariable=self.net_text, style="Net.TLabel",
-                  wraplength=460, justify="left").grid(row=8, column=0, columnspan=3, sticky="w", padx=8)
+                  wraplength=600, justify="left").grid(row=8, column=0, columnspan=3, sticky="w", padx=8)
 
         bg_row = ttk.Frame(frame_results, style="Card.TFrame")
         bg_row.grid(row=9, column=0, columnspan=3, sticky="ew", padx=8, pady=(4, 2))
@@ -801,13 +973,17 @@ class DAQCounterApp(tk.Tk):
         tab_series = ttk.Frame(nb)
         tab_plateau = ttk.Frame(nb)
         tab_decay = ttk.Frame(nb)
+        tab_stats = ttk.Frame(nb)
+        tab_dead = ttk.Frame(nb)
         tab_device = ttk.Frame(nb)
         tab_csv = ttk.Frame(nb)
 
         nb.add(tab_measure, text="Pomiar")
         nb.add(tab_series, text="Seria")
+        nb.add(tab_stats, text="Statystyka")
         nb.add(tab_plateau, text="Plateau")
         nb.add(tab_decay, text="Zanik")
+        nb.add(tab_dead, text="Czas martwy")
         nb.add(tab_device, text="Urzadzenie")
         nb.add(tab_csv, text="Zapis")
 
@@ -952,6 +1128,8 @@ class DAQCounterApp(tk.Tk):
 
         self._build_plateau_tab(tab_plateau)
         self._build_decay_tab(tab_decay)
+        self._build_stats_tab(tab_stats)
+        self._build_deadtime_tab(tab_dead)
 
         # PRAWA: wykres
         right.grid_rowconfigure(0, weight=1)
@@ -1037,6 +1215,8 @@ class DAQCounterApp(tk.Tk):
             self.e_runs, self.e_pause,
             self.btn_plateau, self.e_pl_voltage, self.e_pl_time, self.e_decay_bg,
             self.btn_bg_save, self.btn_bg_clear,
+            self.btn_hist_start, self.e_hist_n, self.e_hist_t,
+            self.e_dt_time, self.btn_dt_use, *self._dt_buttons.values(),
         ]
         self._readonly_combos = (self.cb_kind, self.om_unit)
 
@@ -1159,6 +1339,9 @@ class DAQCounterApp(tk.Tk):
             (self.decay_bg_cps, "Tlo CPS (zakladka Zanik)", False),
             (self.sim_rate_cps, "Szybkosc CPS (zakladka Urzadzenie)", False),
             (self.dead_time_us, "Czas martwy (zakladka Urzadzenie)", False),
+            (self.hist_intervals, "Liczba przedzialow (zakladka Statystyka)", True),
+            (self.hist_interval_s, "Dlugosc przedzialu (zakladka Statystyka)", False),
+            (self.dt_meas_s, "Czas kazdego pomiaru (zakladka Czas martwy)", False),
         ]
         try:
             for var, label, integer in fields:
@@ -1242,11 +1425,13 @@ class DAQCounterApp(tk.Tk):
         self.decay_bg_cps.set(round(cps, 4))
         self.bg_text.set(f"Tlo: {_fmt_unc(cps, u)} CPS   (N = {n}, t = {_fmt_pl(t, 1)} s)")
         self._refresh_result_lines(n, t)
+        self._refresh_deadtime()
         self.status.set("Zapisano tlo. Teraz poloz zrodlo i zmierz - wynik netto pojawi sie pod wynikiem.")
 
     def clear_background(self):
         self._bg = None
         self.bg_text.set("Tlo: nie zapisane")
+        self._refresh_deadtime()
         if self._last_summary:
             self._refresh_result_lines(self._last_summary[0], self._last_summary[1])
         self.status.set("Wyczyszczono tlo.")
@@ -1282,7 +1467,8 @@ class DAQCounterApp(tk.Tk):
             (self.btn_refresh_dev, "Ponownie wyszukaj karty NI (np. po podlaczeniu USB)."),
             (self.e_pfi, "Wejscie karty, do ktorego podlaczony jest sygnal z dyskryminatora (zwykle PFI0).\n"
                          "Sygnal musi byc logiczny 0..5 V."),
-            (self.cb_sim, "Symulator losuje zliczenia (rozklad Poissona) - do nauki obslugi programu bez karty."),
+            (self.cb_sim, "Symulator losuje zliczenia (rozklad Poissona) - do nauki obslugi programu bez karty.\n"
+                          "Symulowany licznik ma czas martwy 100 us (jak typowy GM)."),
             (self.e_rate, "Srednie tempo zliczen w symulatorze (impulsy na sekunde)."),
             (self.e_tau, "Czas martwy licznika w mikrosekundach (dla GM zwykle ~100 us).\n"
                          "0 = bez korekty. Program pokazuje wtedy \"CPS popr.\"."),
@@ -1300,6 +1486,18 @@ class DAQCounterApp(tk.Tk):
             (self.btn_copy, "Kopiuje wynik z niepewnoscia do schowka (np. do sprawozdania)."),
             (self.lbl_result, "Niepewnosc zliczen: sqrt(N). Niepewnosc tempa: sqrt(N)/t.\n"
                               "Niepewnosc zaokraglona do 2 cyfr znaczacych."),
+            (self.e_hist_n, "Ile przedzialow zmierzyc. Im wiecej, tym lepiej widac ksztalt rozkladu\n"
+                            "(50-200 to dobry wybor). Caly pomiar trwa: liczba x dlugosc."),
+            (self.e_hist_t, "Dlugosc jednego przedzialu (min. 0,2 s). Dobierz tak, zeby srednio\n"
+                            "wypadalo 5-20 zliczen na przedzial."),
+            (self.btn_hist_start, "Jeden ciagly pomiar podzielony na rowne przedzialy.\n"
+                                  "Program liczy histogram, srednia, odchylenie i test chi² zgodnosci z Poissonem."),
+            (self.e_dt_time, "Czas kazdego z 3 pomiarow. Dluzej = mniejsza niepewnosc tau."),
+            (self._dt_buttons["r1"], "Pomiar z samym zrodlem 1."),
+            (self._dt_buttons["r12"], "Pomiar z oboma zrodlami. Zrodlo 1 zostaje na miejscu!"),
+            (self._dt_buttons["r2"], "Pomiar z samym zrodlem 2. Zrodlo 2 zostaje na miejscu!"),
+            (self.btn_dt_use, "Wpisz zmierzone tau do pola \"Czas martwy\" (zakladka Urzadzenie),\n"
+                              "zeby program pokazywal poprawione CPS."),
         ]
         for widget, text in tips:
             self._tip(widget, text)
@@ -1453,6 +1651,353 @@ class DAQCounterApp(tk.Tk):
             pass
 
     # ---------------------------------------------------------------
+    # ZAKLADKA STATYSTYKA (histogram + rozklad Poissona)
+    # ---------------------------------------------------------------
+    def _build_stats_tab(self, parent):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(2, weight=1)
+
+        box = ttk.LabelFrame(parent, text="Histogram zliczen", style="Card.TLabelframe")
+        box.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 8))
+        box.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(box, text="Liczba przedzialow:").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=6)
+        self.e_hist_n = ttk.Entry(box, textvariable=self.hist_intervals, width=10)
+        self.e_hist_n.grid(row=0, column=1, sticky="w", pady=6)
+
+        ttk.Label(box, text="Dlugosc przedzialu [s]:").grid(row=1, column=0, sticky="e", padx=(8, 4), pady=6)
+        self.e_hist_t = ttk.Entry(box, textvariable=self.hist_interval_s, width=10)
+        self.e_hist_t.grid(row=1, column=1, sticky="w", pady=6)
+
+        btns = ttk.Frame(box)
+        btns.grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 8))
+        self.btn_hist_start = ttk.Button(btns, text="Start histogramu", style="Accent.TButton",
+                                         command=self.start_histogram)
+        self.btn_hist_start.pack(side="left")
+        ttk.Button(btns, text="Wyczysc", command=self.clear_histogram).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Eksport CSV", command=self.export_hist_csv).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Zapisz PNG",
+                   command=lambda: self._save_figure_png(self.hist_fig, "histogram")).pack(side="left", padx=(8, 0))
+
+        self.lbl_hist_info = ttk.Label(
+            parent, style="Muted.TLabel", justify="left", wraplength=600,
+            text="Jeden ciagly pomiar podzielony na rowne przedzialy. Najlepiej srednio 5-20 zliczen\n"
+                 "na przedzial (dobierz dlugosc przedzialu albo odleglosc zrodla).")
+        self.lbl_hist_info.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
+
+        holder = ttk.Frame(parent)
+        holder.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        holder.grid_rowconfigure(0, weight=1)
+        holder.grid_columnconfigure(0, weight=1)
+        self.hist_fig = Figure(figsize=(3.6, 2.6), dpi=100)
+        self.hist_fig.patch.set_facecolor(self.ui["card"])
+        self.hist_ax = self.hist_fig.add_subplot(111)
+        self._style_ax(self.hist_ax, "N w przedziale", "liczba przedzialow")
+        self.hist_canvas = FigureCanvasTkAgg(self.hist_fig, master=holder)
+        self.hist_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+    def start_histogram(self):
+        if self.running or self.series_active or self._closing:
+            return
+        if not self._normalize_inputs():
+            return
+        k = int(self.hist_intervals.get())
+        T = float(self.hist_interval_s.get())
+        if not (10 <= k <= 100000):
+            messagebox.showerror("Histogram", "Liczba przedzialow musi byc od 10 do 100000.")
+            return
+        if T < 0.2:
+            messagebox.showerror("Histogram", "Przedzial musi miec co najmniej 0,2 s.")
+            return
+        if self._hist_counts and not messagebox.askyesno(
+                "Histogram", "Nowy pomiar usunie obecny histogram. Kontynuowac?", parent=self):
+            return
+
+        self._hist_counts = []
+        self._hist_T = T
+        self._hist_next = T
+        self._hist_last_n = 0
+        self._hist_skipped = 0
+        self._hist_discard_next = False
+        self.mode.set("time")
+        self.hist_active = True
+        self.stop_task()
+        self._close_csv()
+        self._redraw_hist()
+        if not self._start_run_internal(from_series=False, override_time_s=k * T):
+            self.hist_active = False
+            return
+        self.status.set(f"Histogram: {k} przedzialow po {_fmt_pl(T, 2)} s "
+                        f"(razem {_fmt_pl(k * T / 60.0, 1)} min)...")
+
+    def _hist_tick(self, t: float, counts: int):
+        """Wolane przy kazdym odczycie: zamyka przedzial, gdy minela jego granica."""
+        T = self._hist_T
+        if t < self._hist_next:
+            return
+        if t >= self._hist_next + T:
+            # program sie przycial i przeskoczyl granice - ten i nastepny przedzial maja zla dlugosc
+            self._hist_skipped += 1
+            self._hist_next = (math.floor(t / T) + 1) * T
+            self._hist_discard_next = True
+        elif self._hist_discard_next:
+            self._hist_skipped += 1
+            self._hist_next += T
+            self._hist_discard_next = False
+        else:
+            self._hist_counts.append(counts - self._hist_last_n)
+            self._hist_next += T
+        self._hist_last_n = counts
+        self._redraw_hist()
+
+    def _hist_summary(self):
+        v = self._hist_counts
+        m = len(v)
+        if m < 2:
+            return None
+        mean = sum(v) / m
+        s = math.sqrt(sum((x - mean) ** 2 for x in v) / (m - 1))
+        return {"m": m, "mean": mean, "s": s, "u_mean": s / math.sqrt(m),
+                "chi": _poisson_chi2(v)}
+
+    def _redraw_hist(self):
+        st = self._hist_summary()
+        lines = []
+        if st is None:
+            lines.append(f"Przedzialow: {len(self._hist_counts)}")
+        else:
+            mean, s = st["mean"], st["s"]
+            disp = (s * s / mean) if mean > 0 else float("nan")
+            lines.append(f"Przedzialow: {st['m']} x {_fmt_pl(self._hist_T, 2)} s    "
+                         f"srednia N = {_fmt_unc(mean, st['u_mean'])}")
+            lines.append(f"odch. std s = {_fmt_pl(s, 2)}    Poisson: sqrt(srednia) = "
+                         f"{_fmt_pl(math.sqrt(max(mean, 0)), 2)}    s²/srednia = {_fmt_pl(disp, 2)}")
+            chi = st["chi"]
+            if chi is None:
+                lines.append("Test chi²: za malo danych (potrzeba min. 10 przedzialow i kilku klas).")
+            else:
+                chi2, dof, p = chi
+                verdict = ("zgodne z rozkladem Poissona" if p >= 0.05
+                           else "NIEZGODNE z rozkladem Poissona (p < 0,05)")
+                lines.append(f"Test chi² = {_fmt_pl(chi2, 1)} dla {dof} st. swobody, "
+                             f"p = {_fmt_pl(p, 2)} -> {verdict}")
+            if mean > 50:
+                lines.append("Srednia > 50: Poisson wyglada juz jak Gauss - dla cwiczenia skroc przedzial.")
+            elif mean < 2:
+                lines.append("Srednia < 2: bardzo malo zliczen - wydluz przedzial albo zbliz zrodlo.")
+        if self._hist_skipped:
+            lines.append(f"Pominieto {self._hist_skipped} przedzial(y) - program nie nadazal z odczytem.")
+        self.lbl_hist_info.configure(text="\n".join(lines))
+
+        try:
+            ax = self.hist_ax
+            ax.clear()
+            self._style_ax(ax, "N w przedziale", "liczba przedzialow")
+            v = self._hist_counts
+            if v:
+                lo, hi = min(v), max(v)
+                freq = [0] * (hi - lo + 1)
+                for x in v:
+                    freq[x - lo] += 1
+                ax.bar(range(lo, hi + 1), freq, width=0.85, color=self.ui["accent_soft"],
+                       edgecolor=self.ui["accent"], label="pomiar")
+                if st is not None and st["mean"] > 0:
+                    mean, m = st["mean"], st["m"]
+                    k_lo = max(0, int(mean - 4 * math.sqrt(mean) - 1))
+                    k_hi = int(mean + 4 * math.sqrt(mean) + 2)
+                    ks = list(range(min(k_lo, lo), max(k_hi, hi) + 1))
+                    ax.plot(ks, [m * _poisson_pmf(k, mean) for k in ks], "o", color=self.ui["danger"],
+                            markersize=4, label="Poisson")
+                    sd = math.sqrt(mean)
+                    xx = [ks[0] + (ks[-1] - ks[0]) * i / 200.0 for i in range(201)]
+                    ax.plot(xx, [m / (sd * math.sqrt(2 * math.pi)) * math.exp(-0.5 * ((x - mean) / sd) ** 2)
+                                 for x in xx], "-", color=self.ui["muted"], linewidth=1.2, label="Gauss")
+                ax.legend(fontsize=8, loc="best")
+            self.hist_fig.tight_layout()
+            self.hist_canvas.draw_idle()
+        except Exception:
+            pass
+
+    def clear_histogram(self):
+        if self.hist_active:
+            return
+        self._hist_counts = []
+        self._hist_skipped = 0
+        self._redraw_hist()
+
+    def export_hist_csv(self):
+        if not self._hist_counts:
+            messagebox.showinfo("Histogram", "Brak danych histogramu do zapisania.")
+            return
+        path = self._ask_save_path("Eksport histogramu (CSV)", "histogram", ".csv", "CSV")
+        if not path:
+            return
+        v = self._hist_counts
+        st = self._hist_summary()
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                f.write("sep=;\n")
+                f.write(f"# created={datetime.now().isoformat(timespec='seconds')}\n")
+                f.write(f"# kind=histogram\n# interval_s={self._hist_T}\n# intervals={len(v)}\n")
+                if st is not None:
+                    f.write(f"# mean={st['mean']:.6g}\n# u_mean={st['u_mean']:.6g}\n# std={st['s']:.6g}\n")
+                    if st["chi"] is not None:
+                        chi2, dof, p = st["chi"]
+                        f.write(f"# chi2={chi2:.6g}\n# dof={dof}\n# p_value={p:.6g}\n")
+                w = csv.writer(f, delimiter=";", lineterminator="\n")
+                w.writerow(["przedzial", "N"])
+                w.writerows([i + 1, n] for i, n in enumerate(v))
+                f.write("\n")
+                w.writerow(["N", "liczba_przedzialow", "oczekiwane_Poisson"])
+                mean = st["mean"] if st else 0.0
+                for k in range(min(v), max(v) + 1):
+                    w.writerow([k, v.count(k), _fmt_pl(len(v) * _poisson_pmf(k, mean), 3)])
+            self.status.set(f"Zapisano histogram: {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Histogram", f"Nie udalo sie zapisac pliku.\n{e}")
+
+    # ---------------------------------------------------------------
+    # ZAKLADKA CZAS MARTWY (metoda dwoch zrodel)
+    # ---------------------------------------------------------------
+    DT_STEPS = (
+        ("r1", "1. Zrodlo 1",
+         "Poloz ZRODLO 1 w wybranym miejscu przy liczniku (drugie zrodlo daleko)."),
+        ("r12", "2. Zrodla 1 + 2",
+         "Doloz ZRODLO 2 obok zrodla 1.\nNIE ruszaj zrodla 1 - musi zostac dokladnie tam, gdzie bylo."),
+        ("r2", "3. Zrodlo 2",
+         "Zdejmij ZRODLO 1 (odsun daleko).\nNIE ruszaj zrodla 2."),
+    )
+
+    def _build_deadtime_tab(self, parent):
+        parent.grid_columnconfigure(0, weight=1)
+
+        box = ttk.LabelFrame(parent, text="Metoda dwoch zrodel", style="Card.TLabelframe")
+        box.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 8))
+        box.grid_columnconfigure(2, weight=1)
+
+        ttk.Label(box, text="Czas kazdego pomiaru [s]:").grid(row=0, column=0, columnspan=2, sticky="e",
+                                                               padx=(8, 4), pady=6)
+        self.e_dt_time = ttk.Entry(box, textvariable=self.dt_meas_s, width=10)
+        self.e_dt_time.grid(row=0, column=2, sticky="w", pady=6)
+
+        self._dt_buttons = {}
+        self._dt_labels = {}
+        for i, (key, title, _hint) in enumerate(self.DT_STEPS, start=1):
+            ttk.Label(box, text=title).grid(row=i, column=0, sticky="w", padx=(8, 4), pady=3)
+            b = ttk.Button(box, text="Zmierz", style="Small.TButton",
+                           command=lambda k=key: self.start_deadtime_step(k))
+            b.grid(row=i, column=1, sticky="w", padx=4, pady=3)
+            var = tk.StringVar(value="-")
+            ttk.Label(box, textvariable=var).grid(row=i, column=2, sticky="w", padx=(6, 8), pady=3)
+            self._dt_buttons[key] = b
+            self._dt_labels[key] = var
+
+        self.dt_bg_text = tk.StringVar(value="")
+        ttk.Label(box, textvariable=self.dt_bg_text, style="Muted.TLabel", wraplength=580,
+                  justify="left").grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 2))
+
+        self.dt_result_text = tk.StringVar(value="tau: -")
+        ttk.Label(box, textvariable=self.dt_result_text, style="Result.TLabel", wraplength=580,
+                  justify="left", background=self.ui["bg"]).grid(
+            row=5, column=0, columnspan=3, sticky="w", padx=8, pady=(4, 4))
+
+        act = ttk.Frame(box)
+        act.grid(row=6, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 8))
+        self.btn_dt_use = ttk.Button(act, text="Uzyj tau w korekcie", command=self.use_deadtime)
+        self.btn_dt_use.pack(side="left")
+        ttk.Button(act, text="Wyczysc", command=self.clear_deadtime).pack(side="left", padx=(8, 0))
+
+        ttk.Label(parent, style="Muted.TLabel", justify="left", wraplength=600, text=(
+            "Kolejnosc: zrodlo 1 -> oba zrodla -> zrodlo 2. Zrodla nie moga sie przesuwac miedzy pomiarami.\n"
+            "Zrodla musza byc silne (setki-tysiace CPS). Przy malych tempach strat nie widac i tau "
+            "wychodzi w granicach niepewnosci zera.\n"
+            "Tlo bierzemy z przycisku \"Zapamietaj jako tlo\" (jesli nie zapisane: 0).")).grid(
+            row=1, column=0, sticky="w", padx=10, pady=(0, 8))
+        self._refresh_deadtime()
+
+    def start_deadtime_step(self, key: str):
+        if self.running or self.series_active or self._closing:
+            return
+        if not self._normalize_inputs():
+            return
+        tm = float(self.dt_meas_s.get())
+        if tm <= 0:
+            messagebox.showerror("Czas martwy", "Czas pomiaru musi byc > 0.")
+            return
+        title, hint = next((t, h) for k, t, h in self.DT_STEPS if k == key)
+        if not messagebox.askokcancel(f"Czas martwy - {title}", f"{hint}\n\nPomiar {_fmt_pl(tm, 0)} s. Start?",
+                                      parent=self):
+            return
+        self.mode.set("time")
+        self._dt_active_key = key
+        self.stop_task()
+        self._close_csv()
+        if not self._start_run_internal(from_series=False, override_time_s=tm):
+            self._dt_active_key = None
+            return
+        self.status.set(f"Czas martwy: pomiar \"{title}\"...")
+
+    def _refresh_deadtime(self):
+        for key, _title, _hint in self.DT_STEPS:
+            if key in self._dt_data:
+                n, t = self._dt_data[key]
+                self._dt_labels[key].set(f"N = {n}, t = {_fmt_pl(t, 1)} s, "
+                                         f"R = {_fmt_unc(n / t, math.sqrt(n) / t)} CPS")
+            else:
+                self._dt_labels[key].set("-")
+
+        if self._bg is not None:
+            rb, ub = self._bg[0], self._bg[1]
+            self.dt_bg_text.set(f"Tlo: {_fmt_unc(rb, ub)} CPS (z \"Zapamietaj jako tlo\")")
+        else:
+            rb, ub = 0.0, 0.0
+            self.dt_bg_text.set("Tlo: nie zapisane - przyjeto 0 (przy silnych zrodlach to zwykle bez znaczenia).")
+
+        self._dt_result = None
+        if not all(k in self._dt_data for k, _t, _h in self.DT_STEPS):
+            self.dt_result_text.set("tau: - (wykonaj wszystkie 3 pomiary)")
+            return
+        rates, uncs = [], []
+        for key in ("r1", "r2", "r12"):
+            n, t = self._dt_data[key]
+            rates.append(n / t)
+            uncs.append(math.sqrt(n) / t)
+        res = _two_source_tau_unc((*rates, rb), (*uncs, ub))
+        if res is None:
+            self.dt_result_text.set("Nie da sie policzyc tau z tych danych - R(1+2) powinno byc "
+                                    "wieksze od R1 i od R2. Sprawdz ustawienie zrodel.")
+            return
+        tau, u = res
+        tau_us, u_us = tau * 1e6, u * 1e6
+        self._dt_result = (tau, u)
+        txt = f"tau = {_fmt_unc(tau_us, u_us)} us"
+        if not math.isfinite(u) or tau <= 0 or abs(tau) < 2 * u:
+            txt += ("\nStraty niewidoczne w granicach niepewnosci (R1 + R2 - tlo ~ R(1+2)). "
+                    "Uzyj silniejszych zrodel albo dluzszych pomiarow.")
+        else:
+            txt += "   (typowo dla GM: 50-300 us)"
+        self.dt_result_text.set(txt)
+
+    def use_deadtime(self):
+        if self._dt_result is None:
+            messagebox.showinfo("Czas martwy", "Najpierw wykonaj wszystkie 3 pomiary.")
+            return
+        tau, u = self._dt_result
+        if tau <= 0 or not math.isfinite(u) or abs(tau) < 2 * u:
+            messagebox.showwarning("Czas martwy", "Wynik tau jest w granicach niepewnosci zera - "
+                                   "nie ma sensu go uzywac do korekty.")
+            return
+        self.dead_time_us.set(round(tau * 1e6, 1))
+        self.status.set(f"Ustawiono czas martwy {_fmt_pl(tau * 1e6, 1)} us (zakladka Urzadzenie). "
+                        "Od teraz widac \"CPS popr.\".")
+
+    def clear_deadtime(self):
+        if self._dt_active_key:
+            return
+        self._dt_data = {}
+        self._refresh_deadtime()
+
+    # ---------------------------------------------------------------
     # ZAKLADKA ZANIK
     # ---------------------------------------------------------------
     def _build_decay_tab(self, parent):
@@ -1479,7 +2024,8 @@ class DAQCounterApp(tk.Tk):
         ttk.Button(dec_export, text="Zapisz PNG",
                    command=lambda: self._save_figure_png(self.dec_fig, "zanik")).pack(side="left", padx=(8, 0))
 
-        self.lbl_decay_info = ttk.Label(parent, text="t1/2: -", style="Muted.TLabel")
+        self.lbl_decay_info = ttk.Label(parent, text="t1/2: -", style="Muted.TLabel",
+                                        wraplength=600, justify="left")
         self.lbl_decay_info.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
 
         holder = ttk.Frame(parent)
@@ -1497,39 +2043,57 @@ class DAQCounterApp(tk.Tk):
     def _fit_and_plot_decay(self):
         bg = float(self.decay_bg_cps.get())
         self._decay_bg_used = bg
-        xs, ys_ln, ys_raw = [], [], []
-        for tt, c in zip(self._decay_t, self._decay_cps):
-            val = c - bg
+        # niepewnosc tla znamy tylko, jesli pole tla pochodzi z "Zapamietaj jako tlo"
+        u_bg = self._bg[1] if (self._bg is not None and abs(self._bg[0] - bg) < 1e-3) else 0.0
+
+        xs, ys_ln, sig_ln, ys_raw, errs_raw = [], [], [], [], []
+        for tt, c, n, dt in zip(self._decay_t, self._decay_cps, self._decay_n, self._decay_dt):
+            u_c = math.sqrt(max(n, 0)) / dt if dt > 0 else 0.0
             ys_raw.append(c)
-            if val > 0:
+            errs_raw.append(u_c)
+            val = c - bg
+            if val > 0 and n > 0:
                 xs.append(tt)
                 ys_ln.append(math.log(val))
+                # u(ln y) = u(y) / y
+                sig_ln.append(math.sqrt(u_c ** 2 + u_bg ** 2) / val)
 
         a = b = None
         self._decay_fit = None
-        if len(xs) >= 2:
-            b = self._lin_slope(xs, ys_ln)
-            mean_x = sum(xs) / len(xs)
-            mean_y = sum(ys_ln) / len(ys_ln)
-            a = mean_y - b * mean_x
-            lam = -b
-            if lam > 0:
+        fit = _weighted_line_fit(xs, ys_ln, sig_ln) if len(xs) >= 3 else None
+        if fit is not None:
+            a, b, u_b, chi2 = fit
+            lam, u_lam = -b, u_b
+            if lam < 2 * u_lam:
+                txt = (f"Zaniku nie widac: lambda = {_fmt_unc(lam, u_lam)} 1/s jest w granicach niepewnosci "
+                       "zera.\nZrodlo zanika za wolno (np. Cs-137 ma t1/2 = 30 lat) albo pomiar byl za krotki.")
+            elif lam > 0:
                 t_half = math.log(2) / lam
-                self._decay_fit = (lam, t_half)
-                txt = f"t1/2 = {t_half:.4g} s   (lambda = {lam:.4g} /s)"
+                u_half = t_half * u_lam / lam
+                self._decay_fit = (lam, u_lam, t_half, u_half)
+                txt = f"t1/2 = {_fmt_unc(t_half, u_half)} s"
+                if t_half >= 120:
+                    txt += f"  (= {_fmt_unc(t_half / 60, u_half / 60)} min)"
+                txt += f"    lambda = {_fmt_unc(lam, u_lam)} 1/s"
+                dof = len(xs) - 2
+                if dof > 0:
+                    txt += (f"\nDopasowanie wazone niepewnosciami punktow (sqrt(N)), "
+                            f"chi²/st.swob. = {_fmt_pl(chi2 / dof, 2)}")
+                    if chi2 / dof > 3:
+                        txt += " - punkty odbiegaja od prostej bardziej niz wynika z niepewnosci"
             else:
-                txt = "Dopasowanie nie wskazuje rozpadu (lambda <= 0)."
+                txt = "Dopasowanie nie wskazuje rozpadu (lambda <= 0) - to zrodlo zanika za wolno albo tlo jest zle."
             self.lbl_decay_info.configure(text=txt)
-            self.status.set("Zanik: " + txt)
+            self.status.set("Zanik: " + txt.splitlines()[0])
         else:
-            self.lbl_decay_info.configure(text="Za malo punktow > tla do dopasowania.")
+            self.lbl_decay_info.configure(text="Za malo punktow powyzej tla do dopasowania (min. 3).")
 
         try:
             self.dec_ax.clear()
             self._style_ax(self.dec_ax, "t [s]", "CPS")
             if self._decay_t:
-                self.dec_ax.plot(self._decay_t, ys_raw, "o", color=self.ui["accent"], markersize=5,
-                                 label="dane")
+                self.dec_ax.errorbar(self._decay_t, ys_raw, yerr=errs_raw, fmt="o", color=self.ui["accent"],
+                                     ecolor=self.ui["muted"], capsize=3, markersize=5, label="dane")
                 if a is not None and b is not None:
                     xmin, xmax = min(self._decay_t), max(self._decay_t)
                     xx = [xmin + (xmax - xmin) * k / 60.0 for k in range(61)]
@@ -1686,8 +2250,9 @@ class DAQCounterApp(tk.Tk):
         bg = self._decay_bg_used
         comments = ["kind=decay", f"bg_cps={bg}"]
         if self._decay_fit is not None:
-            lam, t_half = self._decay_fit
-            comments += [f"lambda_per_s={lam:.6g}", f"t_half_s={t_half:.6g}"]
+            lam, u_lam, t_half, u_half = self._decay_fit
+            comments += [f"lambda_per_s={lam:.6g}", f"u_lambda_per_s={u_lam:.6g}",
+                         f"t_half_s={t_half:.6g}", f"u_t_half_s={u_half:.6g}", "fit=wazony (1/sigma^2)"]
         else:
             comments.append("fit=brak")
 
@@ -1863,6 +2428,8 @@ class DAQCounterApp(tk.Tk):
         rate = float(self.sim_rate_cps.get())
         if rate < 0:
             rate = 0.0
+        # licznik z czasem martwym (nieparalizujacy): widziane tempo = n / (1 + n*tau)
+        rate = rate / (1.0 + rate * SIM_DEAD_TIME_S)
 
         inc = self._poisson_sample(rate * dt)
         self._sim_counts += inc
@@ -2094,7 +2661,9 @@ class DAQCounterApp(tk.Tk):
         else:
             self.status.set("Pomiar trwa...")
 
-        self._after_update_id = self.after(100, self._update)
+        # histogram: granice przedzialow musza byc trafione dokladnie, wiec odpytujemy czesciej
+        self._poll_ms = 20 if self.hist_active else 100
+        self._after_update_id = self.after(self._poll_ms, self._update)
         return True
 
     def stop_measurement(self):
@@ -2139,6 +2708,23 @@ class DAQCounterApp(tk.Tk):
                 self._store_plateau_point()
                 self.status.set(f"Plateau: zapisano punkt {self._plateau_voltage_pending:.0f} V.")
             self.plateau_active = False
+
+        if self.hist_active:
+            self.hist_active = False
+            self._redraw_hist()
+            n_int = len(self._hist_counts)
+            self.status.set(f"Histogram: {n_int} przedzialow" +
+                            ("." if ended_normally else " (pomiar przerwany - analiza z tego, co jest)."))
+
+        if self._dt_active_key is not None:
+            key = self._dt_active_key
+            self._dt_active_key = None
+            if ended_normally and self._last_t > 0:
+                self._dt_data[key] = (self._last_counts, self._last_t)
+                self._refresh_deadtime()
+                left = [t for k, t, _h in self.DT_STEPS if k not in self._dt_data]
+                self.status.set("Czas martwy: zapisano pomiar." +
+                                (f" Nastepny: {left[0]}." if left else " Wynik tau w zakladce Czas martwy."))
 
         if self._last_t > 0:
             desc = "pomiar zatrzymany recznie" if not ended_normally else "ostatni pomiar"
@@ -2284,6 +2870,9 @@ class DAQCounterApp(tk.Tk):
                 self._log_row(run_idx, t, counts)
                 self._last_log_t = t
 
+        if self.hist_active:
+            self._hist_tick(t, counts)
+
         # warunki zakonczenia runa
         if self.mode.get() == "time" and self.target_time_s and t >= self.target_time_s:
             self.running = False
@@ -2295,7 +2884,7 @@ class DAQCounterApp(tk.Tk):
             self._finalize_measurement("Zakonczono (osiagnieto N).", ended_normally=True)
             return
 
-        self._after_update_id = self.after(100, self._update)
+        self._after_update_id = self.after(self._poll_ms, self._update)
 
     # ---------------------------------------------------------------
     # RESET / TASK / CLOSE
@@ -2305,6 +2894,8 @@ class DAQCounterApp(tk.Tk):
         self.running = False
         self.plateau_active = False
         self._is_decay = False
+        self.hist_active = False
+        self._dt_active_key = None
 
         self._cancel_all_timers()
         self._stop_click_pump()
