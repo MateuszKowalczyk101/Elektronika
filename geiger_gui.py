@@ -62,11 +62,18 @@ print("PYTHON:", sys.executable)
 try:
     import nidaqmx
     from nidaqmx.constants import Edge
+    from nidaqmx.system import System
     NIDAQ_AVAILABLE = True
 except Exception:
     nidaqmx = None
     Edge = None
+    System = None
     NIDAQ_AVAILABLE = False
+
+
+def _fmt_pl(x: float, digits: int = 3) -> str:
+    """Liczba z przecinkiem dziesietnym (Excel PL)."""
+    return f"{x:.{digits}f}".replace(".", ",")
 
 
 def _default_font_family() -> str:
@@ -191,6 +198,12 @@ class DAQCounterApp(tk.Tk):
         self._series_start_perf = None
         self._decay_t = []
         self._decay_cps = []
+        self._decay_n = []
+        self._decay_dt = []
+        self._decay_fit = None            # (lambda, t_half) albo None
+
+        # lista wykrytych kart NI
+        self.daq_info = tk.StringVar(value="")
 
         # DZWIEK
         self.sound_enabled = tk.BooleanVar(value=True)
@@ -243,6 +256,16 @@ class DAQCounterApp(tk.Tk):
         m_file = tk.Menu(menubar, tearoff=0)
         m_file.add_command(label="Wybierz plik CSV...", command=self.pick_csv_file)
         m_file.add_command(label="Wyczysc wyniki serii", command=self.clear_series_results)
+        m_file.add_separator()
+        m_file.add_command(label="Zapisz wykres N(t) (PNG)...",
+                           command=lambda: self._save_figure_png(self.fig, "wykres_N_t"))
+        m_file.add_command(label="Zapisz wykres plateau (PNG)...",
+                           command=lambda: self._save_figure_png(self.pl_fig, "plateau"))
+        m_file.add_command(label="Zapisz wykres zaniku (PNG)...",
+                           command=lambda: self._save_figure_png(self.dec_fig, "zanik"))
+        m_file.add_separator()
+        m_file.add_command(label="Eksport plateau (CSV)...", command=self.export_plateau_csv)
+        m_file.add_command(label="Eksport zaniku (CSV)...", command=self.export_decay_csv)
         m_file.add_separator()
         m_file.add_command(label="Zakoncz", command=self.on_close)
         menubar.add_cascade(label="Plik", menu=m_file)
@@ -711,8 +734,14 @@ class DAQCounterApp(tk.Tk):
         dev_box.grid_columnconfigure(1, weight=1)
 
         ttk.Label(dev_box, text="Kanal licznika:").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=6)
-        self.e_channel = ttk.Entry(dev_box, textvariable=self.counter_channel, width=18)
-        self.e_channel.grid(row=0, column=1, sticky="w", pady=6)
+        chan_row = ttk.Frame(dev_box)
+        chan_row.grid(row=0, column=1, sticky="w", pady=6)
+        # edytowalny: lista wykrytych kanalow, ale mozna tez wpisac recznie
+        self.e_channel = ttk.Combobox(chan_row, textvariable=self.counter_channel, width=16)
+        self.e_channel.pack(side="left")
+        self.btn_refresh_dev = ttk.Button(chan_row, text="Odswiez",
+                                          command=lambda: self.refresh_devices(show_errors=True))
+        self.btn_refresh_dev.pack(side="left", padx=(6, 0))
 
         ttk.Label(dev_box, text="Wejscie sygnalu (PFI):").grid(row=1, column=0, sticky="e", padx=(8, 4), pady=6)
         self.e_pfi = ttk.Entry(dev_box, textvariable=self.pfi_term, width=18)
@@ -728,8 +757,8 @@ class DAQCounterApp(tk.Tk):
         self.e_rate = ttk.Entry(rate_row, textvariable=self.sim_rate_cps, width=10)
         self.e_rate.grid(row=0, column=1, sticky="w", padx=8)
 
-        hint = "NI-DAQ: OK" if NIDAQ_AVAILABLE else "NI-DAQ: brak (symulator zalecany)"
-        ttk.Label(dev_box, text=hint).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 10))
+        ttk.Label(dev_box, textvariable=self.daq_info, wraplength=320, justify="left").grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 10))
 
         ttk.Label(dev_box, text="Czas martwy tau [us]:").grid(row=5, column=0, sticky="e", padx=(8, 4), pady=(0, 8))
         self.e_tau = ttk.Entry(dev_box, textvariable=self.dead_time_us, width=10)
@@ -768,6 +797,8 @@ class DAQCounterApp(tk.Tk):
         top_plot.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         ttk.Checkbutton(top_plot, text="Wykres na zywo", variable=self.plot_live).pack(side="left", anchor="w")
         ttk.Checkbutton(top_plot, text="Klik licznika", variable=self.click_enabled).pack(side="left", anchor="w", padx=(16, 0))
+        ttk.Button(top_plot, text="Zapisz PNG", style="Neutral.TButton",
+                   command=lambda: self._save_figure_png(self.fig, "wykres_N_t")).pack(side="right")
 
         self.fig = Figure(figsize=(6.5, 4.2), dpi=100)
         self.fig.patch.set_facecolor(self.ui["card"])
@@ -828,13 +859,14 @@ class DAQCounterApp(tk.Tk):
         # rzeczy blokowane podczas pomiaru
         self._lock_widgets = [
             self.cb_kind,
-            self.e_channel, self.e_pfi, self.cb_sim, self.e_rate, self.e_tau,
+            self.e_channel, self.btn_refresh_dev, self.e_pfi, self.cb_sim, self.e_rate, self.e_tau,
             self.rb_time, self.e_time, self.om_unit, self.rb_counts, self.e_counts,
             self.cb_csv, self.btn_pick, self.btn_csv_pick_bottom, self.btn_csv_toggle_bottom,
             self.e_runs, self.e_pause,
             self.btn_plateau, self.e_pl_voltage, self.e_pl_time, self.e_decay_bg,
         ]
 
+        self.refresh_devices(show_errors=False)
         self._on_sim_toggle()
         self._sync_start_label()
         self._refresh_csv_toggle_button()
@@ -881,6 +913,12 @@ class DAQCounterApp(tk.Tk):
         self.btn_plateau.grid(row=2, column=0, padx=8, pady=(4, 8), sticky="w")
         ttk.Button(box, text="Wyczysc", command=self.clear_plateau).grid(
             row=2, column=1, padx=8, pady=(4, 8), sticky="w")
+
+        pl_export = ttk.Frame(box)
+        pl_export.grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+        ttk.Button(pl_export, text="Eksport CSV", command=self.export_plateau_csv).pack(side="left")
+        ttk.Button(pl_export, text="Zapisz PNG",
+                   command=lambda: self._save_figure_png(self.pl_fig, "plateau")).pack(side="left", padx=(8, 0))
 
         self.lbl_plateau_info = ttk.Label(parent, text="Ustaw napiecie na zasilaczu, potem zmierz punkt.",
                                           style="Muted.TLabel")
@@ -996,6 +1034,12 @@ class DAQCounterApp(tk.Tk):
                   style="Muted.TLabel", justify="left").grid(
             row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
 
+        dec_export = ttk.Frame(box)
+        dec_export.grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+        ttk.Button(dec_export, text="Eksport CSV", command=self.export_decay_csv).pack(side="left")
+        ttk.Button(dec_export, text="Zapisz PNG",
+                   command=lambda: self._save_figure_png(self.dec_fig, "zanik")).pack(side="left", padx=(8, 0))
+
         self.lbl_decay_info = ttk.Label(parent, text="t1/2: -", style="Muted.TLabel")
         self.lbl_decay_info.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
 
@@ -1022,6 +1066,7 @@ class DAQCounterApp(tk.Tk):
                 ys_ln.append(math.log(val))
 
         a = b = None
+        self._decay_fit = None
         if len(xs) >= 2:
             b = self._lin_slope(xs, ys_ln)
             mean_x = sum(xs) / len(xs)
@@ -1030,6 +1075,7 @@ class DAQCounterApp(tk.Tk):
             lam = -b
             if lam > 0:
                 t_half = math.log(2) / lam
+                self._decay_fit = (lam, t_half)
                 txt = f"t1/2 = {t_half:.4g} s   (lambda = {lam:.4g} /s)"
             else:
                 txt = "Dopasowanie nie wskazuje rozpadu (lambda <= 0)."
@@ -1083,6 +1129,132 @@ class DAQCounterApp(tk.Tk):
                 self.status.set("Brak NI-DAQ w tym Pythonie. Zostaje symulator.")
             else:
                 self.status.set("Tryb NI-DAQ aktywny.")
+
+    # ---------------------------------------------------------------
+    # WYKRYWANIE KART NI
+    # ---------------------------------------------------------------
+    def _scan_counter_channels(self):
+        """Zwraca (lista kanalow licznika np. 'Dev1/ctr0', opis dla uzytkownika, czy_blad)."""
+        if not NIDAQ_AVAILABLE:
+            return [], "NI-DAQ: brak paczki nidaqmx w tym Pythonie (symulator).", True
+        try:
+            devices = list(System.local().devices)
+        except Exception as e:
+            return [], f"NI-DAQ: blad sterownika NI-DAQmx: {e}", True
+        if not devices:
+            return [], ("NI-DAQ: nidaqmx dziala, ale nie widzi zadnej karty. Sprawdz kabel USB "
+                        "i czy NI MAX widzi karte."), True
+
+        channels, names = [], []
+        for d in devices:
+            try:
+                channels.extend(d.ci_physical_chans.channel_names)
+            except Exception:
+                pass
+            try:
+                names.append(f"{d.name} ({d.product_type})")
+            except Exception:
+                names.append(d.name)
+        if not channels:
+            return [], "NI-DAQ: karty " + ", ".join(names) + " nie maja licznikow (ctr).", True
+        return channels, "NI-DAQ: " + ", ".join(names), False
+
+    def refresh_devices(self, show_errors: bool = True):
+        channels, info, is_error = self._scan_counter_channels()
+        self.e_channel.configure(values=channels)
+        if channels and self.counter_channel.get() not in channels:
+            self.counter_channel.set(channels[0])
+        self.daq_info.set(info)
+        if is_error and show_errors:
+            messagebox.showwarning("NI-DAQ", info)
+        elif not is_error:
+            self.status.set(f"Wykryte kanaly licznika: {', '.join(channels)}")
+
+    # ---------------------------------------------------------------
+    # PNG / EKSPORT
+    # ---------------------------------------------------------------
+    def _ask_save_path(self, title: str, prefix: str, ext: str, label: str):
+        docs = os.path.join(os.path.expanduser("~"), "Documents")
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        return filedialog.asksaveasfilename(
+            title=title,
+            defaultextension=ext,
+            initialdir=docs,
+            initialfile=f"{prefix}_{ts}{ext}",
+            filetypes=[(label, f"*{ext}")]
+        )
+
+    def _save_figure_png(self, fig, prefix: str):
+        path = self._ask_save_path("Zapisz wykres (PNG)", prefix, ".png", "PNG")
+        if not path:
+            return
+        try:
+            fig.savefig(path, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
+            self.status.set(f"Zapisano wykres: {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("PNG", f"Nie udalo sie zapisac wykresu.\n{e}")
+
+    def _write_table_csv(self, path: str, comments, header, rows):
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            f.write("sep=;\n")
+            f.write(f"# created={datetime.now().isoformat(timespec='seconds')}\n")
+            for line in comments:
+                f.write(f"# {line}\n")
+            w = csv.writer(f, delimiter=";", lineterminator="\n")
+            w.writerow(header)
+            w.writerows(rows)
+
+    def export_plateau_csv(self):
+        if not self.plateau_points:
+            messagebox.showinfo("Plateau", "Brak punktow plateau do zapisania.")
+            return
+        path = self._ask_save_path("Eksport plateau (CSV)", "plateau", ".csv", "CSV")
+        if not path:
+            return
+
+        pts = sorted(self.plateau_points, key=lambda p: p[0])
+        comments = ["kind=plateau", f"points={len(pts)}"]
+        if len(pts) >= 2:
+            xs = [p[0] for p in pts]
+            ys = [p[3] for p in pts]
+            mean_cps = sum(ys) / len(ys)
+            if mean_cps > 0:
+                pct = self._lin_slope(xs, ys) / mean_cps * 100.0 * 100.0
+                comments.append(f"slope_pct_per_100V={pct:.3f}")
+        rows = [[_fmt_pl(V, 1), n, _fmt_pl(t), _fmt_pl(cps), _fmt_pl(err)]
+                for (V, n, t, cps, err) in pts]
+        try:
+            self._write_table_csv(path, comments, ["U_V", "N", "t_s", "CPS", "err_CPS"], rows)
+            self.status.set(f"Zapisano plateau: {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Plateau", f"Nie udalo sie zapisac pliku.\n{e}")
+
+    def export_decay_csv(self):
+        if not self._decay_t:
+            messagebox.showinfo("Zanik", "Brak punktow zaniku do zapisania.")
+            return
+        path = self._ask_save_path("Eksport zaniku (CSV)", "zanik", ".csv", "CSV")
+        if not path:
+            return
+
+        bg = float(self.decay_bg_cps.get())
+        comments = ["kind=decay", f"bg_cps={bg}"]
+        if self._decay_fit is not None:
+            lam, t_half = self._decay_fit
+            comments += [f"lambda_per_s={lam:.6g}", f"t_half_s={t_half:.6g}"]
+        else:
+            comments.append("fit=brak")
+
+        rows = []
+        for tt, n, dt, cps in zip(self._decay_t, self._decay_n, self._decay_dt, self._decay_cps):
+            err = math.sqrt(max(n, 0)) / dt if dt > 0 else 0.0
+            rows.append([_fmt_pl(tt), n, _fmt_pl(dt), _fmt_pl(cps), _fmt_pl(err), _fmt_pl(cps - bg)])
+        try:
+            self._write_table_csv(path, comments,
+                                  ["t_mid_s", "N", "t_pomiaru_s", "CPS", "err_CPS", "CPS_netto"], rows)
+            self.status.set(f"Zapisano zanik: {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Zanik", f"Nie udalo sie zapisac pliku.\n{e}")
 
     # ---------------------------------------------------------------
     # CSV
@@ -1276,6 +1448,9 @@ class DAQCounterApp(tk.Tk):
             self._series_start_perf = time.perf_counter()
             self._decay_t = []
             self._decay_cps = []
+            self._decay_n = []
+            self._decay_dt = []
+            self._decay_fit = None
 
         self.clear_series_results()
         self.stop_task()
@@ -1529,6 +1704,8 @@ class DAQCounterApp(tk.Tk):
             midpoint = (time.perf_counter() - self._series_start_perf) - t / 2.0
             self._decay_t.append(midpoint)
             self._decay_cps.append(cps)
+            self._decay_n.append(n)
+            self._decay_dt.append(t)
 
     # ---------------------------------------------------------------
     # UPDATE (petla odpytujaca)
