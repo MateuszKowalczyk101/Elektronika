@@ -1,5 +1,42 @@
 # Elektronika
 
+## Instalacja
+
+Potrzebne sa **dwie** rozne rzeczy:
+
+1. **Sterownik NI-DAQmx** (zawiera program **NI MAX**) - NIE instaluje sie go przez `pip`.
+   Pobierz ze strony NI: https://www.ni.com/en/support/downloads/drivers/download.ni-daq-mx.html
+2. **Paczki Pythona** (m.in. `nidaqmx`). Na komputerach z Anaconda uzyj **Anaconda Prompt**
+   (zwykly CMD/PowerShell moze nie widziec `pip` ani `python`):
+
+   ```
+   pip install -r requirements.txt
+   ```
+
+Jesli NI MAX widzi karte, a Python nie: sprawdz, czy `nidaqmx` jest zainstalowane w tym samym
+srodowisku Pythona, z ktorego uruchamiasz program (np. to samo co Spyder).
+
+Bez karty aplikacja dziala w trybie **symulatora**.
+
+## Budowanie .exe (uruchamianie z pulpitu, bez Spydera)
+
+W Anaconda Prompt, w folderze ze skryptem i ikona `app.ico` (najlepiej na dysku lokalnym, nie sieciowym):
+
+```
+pip install pyinstaller
+python -m PyInstaller --onefile --windowed --icon=app.ico --name="GeigerApp" app.py
+```
+
+Gotowy plik: `dist\GeigerApp.exe` - skopiuj go (albo skrot do niego) na pulpit.
+
+Znane problemy:
+- `pyinstaller` "not recognized" - uzyj `python -m PyInstaller ...` jak wyzej.
+- `The 'pathlib' package is an obsolete backport...` - usun stary pakiet: `conda remove pathlib`
+  (albo `pip uninstall pathlib`) i zbuduj ponownie.
+- `ModuleNotFoundError` przy starcie .exe - dodaj `--hidden-import=nidaqmx --collect-all nidaqmx`.
+
+## Kod
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
