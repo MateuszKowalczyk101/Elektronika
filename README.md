@@ -1,229 +1,212 @@
-# Elektronika
+# GeigerApp – licznik Geigera-Müllera z kartą NI USB-6210
 
-Glowna aplikacja: **`geiger_gui.py`** - GUI do licznika Geigera-Mullera z karta NI USB-6210
-(pomiar pojedynczy i serie, plateau, zanik z dopasowaniem t1/2, korekta czasu martwego, CSV,
-wykres N(t), tryb symulatora). Uruchomienie: `python geiger_gui.py`.
+Program do ćwiczeń laboratoryjnych z promieniotwórczości. Zlicza impulsy z licznika
+Geigera-Müllera przez sprzętowy licznik karty **NI USB-6210**, pokazuje wyniki na żywo
+(od razu z niepewnościami) i prowadzi przez typowe ćwiczenia: tło, statystyka zliczeń,
+plateau licznika, zanik promieniotwórczy i czas martwy.
 
-Dla studentow: wynik od razu z niepewnoscia (np. `CPS = 0,312 ± 0,025`), zapamietywanie tla
-i wynik netto, podpowiedzi po najechaniu mysza, instrukcja cwiczenia pod **F1**.
+Bez karty działa w **trybie symulatora**, więc obsługę można przećwiczyć na dowolnym komputerze.
 
-Cwiczenia: statystyka (histogram z rozkladem Poissona i testem chi²), plateau, zanik (t1/2 z
-niepewnoscia, dopasowanie wazone), czas martwy metoda dwoch zrodel.
+![Okno programu](docs/okno_glowne.png)
 
-## Instalacja
+## Co potrafi
 
-Potrzebne sa **dwie** rozne rzeczy:
+- **Pomiar** w zadanym czasie albo do zadanej liczby impulsów. Wynik od razu z niepewnością,
+  np. `N = 324 ± 18`, `CPS = 53,7 ± 3,0`, i przycisk „Kopiuj wynik” do sprawozdania.
+- **Tło i wynik netto**: po pomiarze tła kliknij „Zapamiętaj jako tło”. Od tej chwili każdy
+  wynik ma też CPS netto (po odjęciu tła) z niepewnością.
+- **Seria** pomiarów z przerwami i tabelą wyników.
+- **Statystyka**: histogram zliczeń z krzywymi Poissona i Gaussa oraz test χ² zgodności
+  z rozkładem Poissona.
+- **Plateau** licznika: CPS w funkcji napięcia i nachylenie plateau w %/100 V.
+- **Zanik**: dopasowanie ważone niepewnościami, t½ i λ z niepewnością.
+- **Czas martwy** metodą dwóch źródeł, z niepewnością. Jednym kliknięciem trafia do korekty
+  „CPS popr.”.
+- Zapis do **CSV** (kolejne pomiary są dopisywane, nic się nie nadpisuje), eksport tabel
+  i wykresów do **CSV/PNG**.
+- Wykrywanie kart NI, podpowiedzi po najechaniu myszą, instrukcja ćwiczeń pod **F1**,
+  skrót **SPACJA** = START/STOP.
 
-1. **Sterownik NI-DAQmx** (zawiera program **NI MAX**) - NIE instaluje sie go przez `pip`.
-   Pobierz ze strony NI: https://www.ni.com/en/support/downloads/drivers/download.ni-daq-mx.html
-2. **Paczki Pythona** (m.in. `nidaqmx`). Na komputerach z Anaconda uzyj **Anaconda Prompt**
-   (zwykly CMD/PowerShell moze nie widziec `pip` ani `python`):
+![Histogram](docs/histogram.png)
 
-   ```
-   pip install -r requirements.txt
-   ```
+## Czego potrzebujesz
 
-Jesli NI MAX widzi karte, a Python nie: sprawdz, czy `nidaqmx` jest zainstalowane w tym samym
-srodowisku Pythona, z ktorego uruchamiasz program (np. to samo co Spyder).
+**Sprzęt**
 
-Bez karty aplikacja dziala w trybie **symulatora**.
+- licznik (sonda) Geigera-Müllera z zasilaczem wysokiego napięcia,
+- wzmacniacz/dyskryminator, który z impulsu licznika robi impuls logiczny **0…5 V (TTL)**,
+- karta **NI USB-6210** podłączona przez USB.
 
-## Budowanie .exe (uruchamianie z pulpitu, bez Spydera)
+**Oprogramowanie** (Windows 10/11)
 
-W Anaconda Prompt, w folderze ze skryptem i ikona `app.ico` (najlepiej na dysku lokalnym, nie sieciowym):
+| Co | Po co | Uwagi |
+|---|---|---|
+| Sterownik **NI-DAQmx** (zawiera program **NI MAX**) | obsługa karty | instalacja wymaga uprawnień administratora; w laboratorium zwykle już jest |
+| **Python 3.9 lub nowszy** (np. z Anacondą) | uruchamianie programu | Anaconda jest zwykle już zainstalowana (np. razem ze Spyderem) |
+| Paczki Pythona: `nidaqmx`, `matplotlib` | komunikacja z kartą, wykresy | instalowane jednym poleceniem, patrz niżej |
+
+> **NI MAX / NI-DAQmx to nie jest paczka Pythona.** Sterownik instaluje się instalatorem NI,
+> a paczkę `nidaqmx` (to, co jest w `import nidaqmx`) poleceniem `pip`. Do pracy z kartą
+> potrzebne są **obie**.
+
+## Instalacja krok po kroku (Windows)
+
+### 1. Sterownik NI-DAQmx
+
+Najpierw sprawdź, czy sterownik już jest: otwórz **NI MAX** i w *Devices and Interfaces*
+poszukaj karty, np. **NI USB-6210 "Dev1"**. Karta jest widoczna? Kliknij *Self-Test*,
+jeśli przejdzie, przejdź do kroku 2.
+
+Jeśli sterownika nie ma, pobierz go ze strony NI:
+<https://www.ni.com/en/support/downloads/drivers/download.ni-daq-mx.html>.
+Instalacja wymaga administratora (na komputerze w pracowni poproś opiekuna/IT).
+
+### 2. Python – użyj „Anaconda Prompt”
+
+W menu Start wpisz **Anaconda Prompt** i otwórz. Wszystkie polecenia poniżej wpisuj
+**tam**, a nie w zwykłym CMD/PowerShellu, bo zwykła konsola często nie widzi `python` ani `pip`.
+
+Sprawdź:
+
+```
+python --version
+pip --version
+```
+
+Nie masz Anacondy? Zainstaluj Pythona z <https://www.python.org/downloads/>. Da się to zrobić
+bez administratora: wybierz *Customize installation*, **odznacz** *Install for all users*
+i **zaznacz** *Add python.exe to PATH*. Potem polecenia wpisuj w nowym oknie CMD.
+
+### 3. Pobierz program
+
+Na stronie repozytorium na GitHubie kliknij **Code → Download ZIP** i rozpakuj,
+najlepiej na **dysku lokalnym**, np. `C:\GeigerApp`. Dyski sieciowe i foldery synchronizowane
+z OneDrive potrafią sprawiać problemy przy budowaniu `.exe`.
+
+Z gitem: `git clone https://github.com/MateuszKowalczyk101/Elektronika.git`
+
+### 4. Zainstaluj paczki Pythona
+
+W Anaconda Prompt przejdź do folderu programu i zainstaluj paczki:
+
+```
+cd C:\GeigerApp
+pip install -r requirements.txt
+```
+
+### 5. Uruchom
+
+```
+python geiger_gui.py
+```
+
+W zakładce **Urządzenie** powinien być napis **„NI-DAQ: Dev1 (USB-6210)”**. Jeśli jest inny
+komunikat, program wyjaśnia, czego brakuje, a pomiary działają w trybie symulatora.
+
+## Uruchamianie z pulpitu (plik .exe)
+
+W Anaconda Prompt, w folderze programu:
+
+```
+build_exe.bat
+```
+
+Skrypt doinstaluje PyInstallera i zbuduje **`dist\GeigerApp.exe`** (jeden plik, z ikoną).
+Skopiuj go na pulpit albo zrób do niego skrót (prawy klik → *Wyślij do → Pulpit*).
+
+- `.exe` zawiera Pythona i paczki, ale **nie zawiera sterownika NI-DAQmx**. Na komputerze
+  z kartą sterownik nadal musi być zainstalowany.
+- Pierwsze uruchomienie trwa kilka sekund, bo program rozpakowuje się do folderu tymczasowego.
+- Po każdej zmianie w `geiger_gui.py` zbuduj `.exe` od nowa.
+- Własna ikona: podmień `assets\geiger.ico` (ikona pliku) i `assets\geiger.png` (ikona okna).
+
+Ręcznie, bez skryptu:
 
 ```
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --icon=app.ico --name="GeigerApp" geiger_gui.py
+python -m PyInstaller --onefile --windowed --name GeigerApp --icon assets\geiger.ico --add-data "assets\geiger.png;assets" --collect-all nidaqmx geiger_gui.py
 ```
 
-Gotowy plik: `dist\GeigerApp.exe` - skopiuj go (albo skrot do niego) na pulpit.
+## Podłączenie sygnału
 
-Znane problemy:
-- `pyinstaller` "not recognized" - uzyj `python -m PyInstaller ...` jak wyzej.
-- `The 'pathlib' package is an obsolete backport...` - usun stary pakiet: `conda remove pathlib`
-  (albo `pip uninstall pathlib`) i zbuduj ponownie.
-- `ModuleNotFoundError` przy starcie .exe - dodaj `--hidden-import=nidaqmx --collect-all nidaqmx`.
+```
+sonda GM  ->  zasilacz WN + wzmacniacz/dyskryminator  ->  NI USB-6210: PFI 0 (sygnał) + D GND (masa)
+```
 
-## Kod
+- Na wejście karty musi iść **impuls logiczny 0…5 V** (próg ok. 1,4 V). Surowego impulsu
+  z anody licznika nie podłączaj bezpośrednio: najpierw dyskryminator.
+- Program domyślnie liczy zbocza narastające na liczniku `Dev1/ctr0` z wejścia `PFI0`.
+  Inne wejście albo licznik ustawisz w zakładce **Urządzenie**.
 
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
-import threading
-import time
-import csv
-import os
-import random
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+## Jak używać
 
-try:
-    import nidaqmx
-    from nidaqmx.constants import AcquisitionType
-    from nidaqmx.system import System
-    DAQ_AVAILABLE = True
-except ImportError:
-    DAQ_AVAILABLE = False
+Instrukcja typowego ćwiczenia jest w programie: klawisz **F1** albo przycisk *Instrukcja (F1)*.
+W skrócie:
 
-class DAQApp:
-    def __init__(self, master):
-        self.master = master
-        self.master.title("DAQ Pomiar")
-        self.master.configure(bg='#ffc0cb')
-        self.running = False
-        self.task_thread = None
-        self.data = []
-        self.save_folder = os.getcwd()
+| Zakładka | Do czego |
+|---|---|
+| Pomiar | pojedynczy pomiar (na czas albo do N impulsów), wybór rodzaju: Pojedynczy / Seria / Zanik |
+| Seria | liczba pomiarów i przerwa, tabela wyników |
+| Statystyka | histogram zliczeń, porównanie z rozkładem Poissona, test χ² |
+| Plateau | CPS przy kolejnych napięciach WN (napięcie ustawiasz ręcznie na zasilaczu) |
+| Zanik | t½ z serii pomiarów (np. Ba-137m); tło wypełnia się samo po „Zapamiętaj jako tło” |
+| Czas martwy | metoda dwóch źródeł: źródło 1 → oba → źródło 2 |
+| Urządzenie | wykryte karty, licznik i wejście PFI, symulator, czas martwy τ |
+| Zapis | plik CSV z pomiarami |
 
-        tk.Label(master, text="Urzadzenie:", bg='#ffc0cb').grid(row=0, column=0, sticky="e")
-        self.device_var = tk.StringVar()
-        self.device_menu = ttk.Combobox(master, textvariable=self.device_var, state="readonly")
-        self.refresh_devices()
-        self.device_menu.grid(row=0, column=1)
+Typowa kolejność: **tło** (300–500 s, bez źródła) → *Zapamiętaj jako tło* → **źródło**
+→ odczytaj *CPS netto*.
 
-        tk.Label(master, text="Tryb pomiaru:", bg='#ffc0cb').grid(row=1, column=0, sticky="e")
-        self.mode_var = tk.StringVar(value="dual")
-        tk.Radiobutton(master, text="1 kanal (AI0)", variable=self.mode_var, value="single", bg='#ffc0cb').grid(row=1, column=1, sticky="w")
-        tk.Radiobutton(master, text="2 kanaly (AI0 + AI1)", variable=self.mode_var, value="dual", bg='#ffc0cb').grid(row=2, column=1, sticky="w")
+## Pliki wynikowe
 
-        tk.Label(master, text="Sample rate (Hz):", bg='#ffc0cb').grid(row=3, column=0, sticky="e")
-        self.sample_entry = tk.Entry(master)
-        self.sample_entry.insert(0, "1000")
-        self.sample_entry.grid(row=3, column=1)
+Pliki CSV otwierają się bezpośrednio w Excelu (polskie ustawienia): separator `;`,
+przecinek dziesiętny, pierwsza linia `sep=;`. Linie zaczynające się od `#` opisują pomiar
+(data, tryb, zapisane tło, wynik dopasowania itp.).
 
-        self.test_mode = tk.BooleanVar()
-        tk.Checkbutton(master, text="Tryb testowy (symulacja)", variable=self.test_mode, bg='#ffc0cb').grid(row=5, column=0, columnspan=2)
+| Plik | Kolumny |
+|---|---|
+| pomiary (zakładka Zapis) | `run; t_s; N; sqrtN` (co 0,2 s i na koniec każdego pomiaru) |
+| histogram | `przedzial; N` oraz tabela `N; liczba_przedzialow; oczekiwane_Poisson` |
+| plateau | `U_V; N; t_s; CPS; err_CPS` |
+| zanik | `t_mid_s; N; t_pomiaru_s; CPS; err_CPS; CPS_netto` |
 
-        tk.Button(master, text="Start", command=self.start_measurement).grid(row=6, column=0, pady=10)
-        tk.Button(master, text="Stop", command=self.stop_measurement).grid(row=6, column=1)
-        tk.Button(master, text="Zapisz wykres", command=self.save_plot).grid(row=7, column=0, columnspan=2)
+## Rozwiązywanie problemów
 
-        self.fig, self.ax = plt.subplots(figsize=(6, 3))
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.master)
-        self.canvas.get_tk_widget().grid(row=8, column=0, columnspan=2)
-        self.line_ai0, = self.ax.plot([], [], label="AI0")
-        self.line_ai1, = self.ax.plot([], [], label="AI1")
-        self.ax.set_xlabel("Czas (s)")
-        self.ax.set_ylabel("Napiecie (V)")
-        self.ax.grid(True)
-        self.ax.legend()
+| Problem | Rozwiązanie |
+|---|---|
+| `'pip'` / `'python'` / `'py' is not recognized` | Używaj **Anaconda Prompt**, nie zwykłego CMD. |
+| Brak uprawnień administratora | Python: Anaconda albo python.org w trybie *Install for me only* (krok 2). Sterownik NI-DAQmx wymaga administratora. |
+| „NI-DAQ: brak paczki nidaqmx” | `pip install -r requirements.txt` w **tym samym** Pythonie, którym uruchamiasz program. |
+| „Could not find an installation of NI-DAQmx” | Nie ma sterownika NI-DAQmx, patrz krok 1. |
+| NI MAX widzi kartę, program nie | Kliknij *Odśwież* w zakładce Urządzenie. Sprawdź, czy `nidaqmx` jest zainstalowane w tym samym Pythonie, którym uruchamiasz program. |
+| „Błąd DAQ” po kliknięciu START | Karta zajęta przez inny program (np. otwarty *Test Panel* w NI MAX): zamknij go. Sprawdź też nazwę licznika w zakładce Urządzenie. |
+| Zliczenia stoją na 0 | Sprawdź kabel na PFI 0 i masę, poziom sygnału 0…5 V i czy wybrane wejście PFI zgadza się z podłączeniem. |
+| `The 'pathlib' package is an obsolete backport…` przy budowaniu `.exe` | `conda remove pathlib` (albo `pip uninstall pathlib`) i zbuduj ponownie. |
+| `.exe` nie startuje / `ModuleNotFoundError` | Buduj przez `build_exe.bat` z dysku lokalnego. Przy starcie przez `python geiger_gui.py` widać pełny komunikat błędu. |
+| W histogramie „pominięto przedziały” | Komputer nie nadążał z odczytem. Pominięte przedziały nie psują wyniku, tylko jest ich mniej. Zamknij inne programy albo wydłuż przedział. |
 
-        self.master.after(100, self.update_plot)
+## Dla rozwijających program
 
-    def refresh_devices(self):
-        if DAQ_AVAILABLE:
-            devices = System.local().devices.device_names
-            self.device_menu['values'] = devices if devices else ["Brak"]
-            if devices:
-                self.device_menu.current(0)
-            else:
-                self.device_menu.set("Brak")
-        else:
-            self.device_menu['values'] = ["Brak"]
-            self.device_menu.set("Brak")
+Cały program to jeden plik `geiger_gui.py` (Tkinter + matplotlib). Obliczenia statystyczne
+(rozkład Poissona, test χ², dopasowanie ważone, czas martwy) są napisane w czystym Pythonie,
+bez numpy/scipy.
 
-    def start_measurement(self):
-        if self.running:
-            return
-        self.running = True
-        self.data = []
-        self.task_thread = threading.Thread(target=self.run_task, daemon=True)
-        self.task_thread.start()
+Testy (symulator, obliczenia i tryb karty NI na atrapie `nidaqmx`, więc bez karty):
 
-    def stop_measurement(self):
-        self.running = False
-        if self.task_thread:
-            self.task_thread.join()
-        self.prompt_save_to_file()
-        messagebox.showinfo("Info", "Pomiar zakonczony i zapisany.")
+```
+pip install -r requirements-dev.txt
+python -m pytest
+```
 
-    def run_task(self):
-        device = self.device_var.get()
-        mode = self.mode_var.get()
-        rate = int(self.sample_entry.get())
-        samples_to_read = rate // 10
-        channels = ["AI0"] if mode == "single" else ["AI0", "AI1"]
-        start_time = time.time()
+## Struktura repozytorium
 
-        if self.test_mode.get() or not DAQ_AVAILABLE or device == "Brak":
-            while self.running:
-                current_time = time.time() - start_time
-                values = [random.uniform(-1, 1)]
-                if mode == "dual":
-                    values.append(random.uniform(-1, 1))
-                self.data.append([current_time] + values)
-                time.sleep(1 / rate)
-        else:
-            with nidaqmx.Task() as task:
-                for ch in channels:
-                    task.ai_channels.add_ai_voltage_chan(f"{device}/{ch}", min_val=-10.0, max_val=10.0)
-                task.timing.cfg_samp_clk_timing(rate=rate, sample_mode=AcquisitionType.CONTINUOUS)
-                task.in_stream.input_buf_size = rate * 10
-
-                while self.running:
-                    try:
-                        readings = task.read(number_of_samples_per_channel=samples_to_read)
-                        if isinstance(readings[0], float):
-                            readings = [readings]
-                        timestamps = [time.time() - start_time] * len(readings[0])
-                        for i in range(len(readings[0])):
-                            row = [timestamps[i]] + [readings[ch][i] for ch in range(len(channels))]
-                            self.data.append(row)
-                        time.sleep(samples_to_read / rate)
-                    except Exception as e:
-                        print("Blad podczas pomiaru:", e)
-                        break
-
-    def prompt_save_to_file(self):
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
-        if not path:
-            return
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, mode='w', newline='') as file:
-            writer = csv.writer(file)
-            headers = ["Czas (s)", "AI0"] if self.mode_var.get() == "single" else ["Czas (s)", "AI0", "AI1"]
-            writer.writerow(headers)
-            writer.writerows(self.data)
-
-    def update_plot(self):
-        try:
-            data_copy = self.data.copy()
-            if not data_copy:
-                self.master.after(100, self.update_plot)
-                return
-            mode = self.mode_var.get()
-            times = [row[0] for row in data_copy if len(row) > 1]
-            ai0_vals = [row[1] for row in data_copy if len(row) > 1]
-            self.line_ai0.set_data(times, ai0_vals)
-
-            if mode == "dual" and all(len(row) > 2 for row in data_copy):
-                ai1_vals = [row[2] for row in data_copy if len(row) > 2]
-                self.line_ai1.set_data(times, ai1_vals)
-            else:
-                self.line_ai1.set_data([], [])
-
-            if times:
-                self.ax.set_xlim(times[0], times[-1])
-            self.ax.relim()
-            self.ax.autoscale_view()
-            self.canvas.draw()
-        except Exception as e:
-            print("Blad podczas rysowania wykresu:", e)
-
-        self.master.after(100, self.update_plot)
-
-    def save_plot(self):
-        path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG files", "*.png")])
-        if not path:
-            return
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.fig.savefig(path)
-        messagebox.showinfo("Zapisano", f"Wykres zapisany do pliku:\n{path}")
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = DAQApp(root)
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        pass
+```
+geiger_gui.py            program
+requirements.txt         paczki potrzebne do uruchomienia
+requirements-dev.txt     + pytest i PyInstaller (testy, budowanie .exe)
+build_exe.bat            budowanie dist\GeigerApp.exe
+assets/                  ikona programu (.ico dla pliku .exe, .png dla okna)
+docs/                    zrzuty ekranu do tego pliku
+tests/                   testy (pytest) i atrapa paczki nidaqmx
+archiwum/                starszy program do pomiaru napięcia (AI0/AI1), niepotrzebny do licznika GM
+```
