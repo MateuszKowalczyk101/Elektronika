@@ -4,6 +4,9 @@ Glowna aplikacja: **`geiger_gui.py`** - GUI do licznika Geigera-Mullera z karta 
 (pomiar pojedynczy i serie, plateau, zanik z dopasowaniem t1/2, korekta czasu martwego, CSV,
 wykres N(t), tryb symulatora). Uruchomienie: `python geiger_gui.py`.
 
+Dla studentow: wynik od razu z niepewnoscia (np. `CPS = 0,312 ± 0,025`), zapamietywanie tla
+i wynik netto, podpowiedzi po najechaniu mysza, instrukcja cwiczenia pod **F1**.
+
 ## Instalacja
 
 Potrzebne sa **dwie** rozne rzeczy:
