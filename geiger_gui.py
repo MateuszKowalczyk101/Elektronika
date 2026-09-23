@@ -827,10 +827,16 @@ class DAQCounterApp(tk.Tk):
         w = self.focus_get()
         try:
             cls = w.winfo_class() if w is not None else ""
+            other_window = w is not None and w.winfo_toplevel() is not self
         except Exception:
-            cls = ""
-        if cls in ("TEntry", "Entry", "TCombobox"):
-            return  # nie przechwytuj podczas edycji pola
+            cls, other_window = "", False
+        if other_window:
+            return  # np. okno instrukcji - spacja nie moze tam startowac pomiaru
+        # pola edycji: spacja to znak; przyciski/pola wyboru: spacja je wciska
+        # (bez tego przycisk START z fokusem startowalby i od razu zatrzymywal pomiar)
+        if cls in ("TEntry", "Entry", "TCombobox", "Text", "TButton", "Button",
+                   "TCheckbutton", "Checkbutton", "TRadiobutton", "Radiobutton"):
+            return
         if self.running or self.series_active:
             self.stop_measurement()
         else:
