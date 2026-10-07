@@ -1,0 +1,4 @@
+# Instalacja:  pip install -r requirements.txt
+# nidaqmx to paczka Pythona; sterownik NI-DAQmx (z NI MAX) instaluje sie osobno - patrz README.
+nidaqmx>=1.0
+matplotlib>=3.5
