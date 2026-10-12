@@ -66,3 +66,15 @@ def test_format_wyniku_z_niepewnoscia():
     assert g._fmt_unc(0.312, 0.02498) == "0,312 ± 0,025"
     assert g._fmt_unc(3.588, 0.448) == "3,59 ± 0,45"
     assert g._fmt_unc(1234.7, 35.0) == "1235 ± 35"
+
+
+def test_plateau_automatyczny_zakres():
+    pts = [(360, 0.5, 0.1), (380, 15, 0.5), (400, 52, 0.93), (420, 54, 0.95), (440, 55, 0.96),
+           (460, 56, 0.97), (480, 57, 0.97), (500, 75, 1.1)]
+    assert g._plateau_auto_range(pts) == (2, 6)
+    pct, u_pct, a, b = g._plateau_slope(pts[2:7])
+    assert 5 < pct < 20 and u_pct > 0
+
+
+def test_plateau_bez_plaskiego_odcinka():
+    assert g._plateau_auto_range([(380, 10, 0.4), (400, 30, 0.7), (420, 60, 1.0)]) is None

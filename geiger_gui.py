@@ -187,6 +187,42 @@ def _weighted_line_fit(xs, ys, sigmas):
     return a, b, u_b, chi2
 
 
+def _plateau_auto_range(pts):
+    """pts: lista (U, CPS, u_CPS) posortowana po U. Zwraca (i_od, i_do) najdluzszego plaskiego odcinka
+    albo None. Sasiednie punkty sa 'plaskie', gdy roznica CPS miesci sie w 3 niepewnosciach
+    plus 15 %/100 V (dobre plateau ma kilka %/100 V; prog i wyladowanie rosna duzo szybciej)."""
+    best, start = None, None
+    for i in range(len(pts) - 1):
+        (u1, c1, e1), (u2, c2, e2) = pts[i], pts[i + 1]
+        mean = (c1 + c2) / 2.0
+        flat = (min(c1, c2) > 0 and
+                abs(c2 - c1) <= 3.0 * math.hypot(e1, e2) + 0.15 * mean * (u2 - u1) / 100.0)
+        if flat:
+            if start is None:
+                start = i
+            if best is None or (i + 1 - start) > (best[1] - best[0]):
+                best = (start, i + 1)
+        else:
+            start = None
+    return best
+
+
+def _plateau_slope(pts):
+    """Nachylenie plateau z dopasowania wazonego prostej CPS(U) do punktow plateau.
+    Zwraca (nachylenie [%/100 V], niepewnosc [%/100 V], a, b) albo None."""
+    if len(pts) < 2:
+        return None
+    xs = [p[0] for p in pts]
+    fit = _weighted_line_fit(xs, [p[1] for p in pts], [p[2] if p[2] > 0 else 1.0 for p in pts])
+    if fit is None:
+        return None
+    a, b, u_b, _chi2 = fit
+    c_mid = a + b * (xs[0] + xs[-1]) / 2.0
+    if c_mid <= 0:
+        return None
+    return b / c_mid * 1e4, u_b / c_mid * 1e4, a, b
+
+
 def _two_source_tau(r1: float, r2: float, r12: float, rb: float = 0.0):
     """Czas martwy [s] metoda dwoch zrodel (wzor z tlem, Knoll). None gdy dane nie pozwalaja."""
     x = r1 * r2 - rb * r12
@@ -269,20 +305,23 @@ class ToolTip:
 INSTRUCTIONS = """\
 INSTRUKCJA - typowe cwiczenie z licznikiem Geigera-Mullera
 
-Skroty: SPACJA = START/STOP,  F1 = ta instrukcja.
-Najedz mysza na pole lub przycisk, zeby zobaczyc podpowiedz.
+Przycisk START (i SPACJA) robi to, co jest w aktualnie otwartej zakladce - napis na
+przycisku to pokazuje, np. "START (seria)" w zakladce Seria. STOP przerywa wszystko.
+F1 = ta instrukcja. Najedz mysza na pole lub przycisk, zeby zobaczyc podpowiedz.
 
 
 0. PRZYGOTOWANIE
    - Zakladka "Urzadzenie": sprawdz, czy program widzi karte (np. "Dev1 (USB-6210)").
-     Jesli nie - kliknij "Odswiez". Bez karty mozesz cwiczyc w trybie symulatora.
+     Jesli nie - kliknij "Odswiez". Bez karty mozesz cwiczyc w trybie symulatora
+     (zolty pasek u gory okna przypomina, ze dane sa wtedy losowane).
    - Zakladka "Zapis": wybierz plik CSV, zeby wyniki trafily do pliku.
-     Kolejne pomiary sa DOPISYWANE do tego samego pliku.
+     Kazdy pomiar (takze plateau, histogram, czas martwy) jest DOPISYWANY do pliku
+     z kolejnym numerem i linia "# wynik" z N, t i CPS.
    - Liczby mozna wpisywac z przecinkiem albo kropka (10,5 lub 10.5).
 
 1. TLO (bez zrodla!)
    - Odsun zrodla od licznika.
-   - Zakladka "Pomiar": "Liczenie w zadanym czasie", np. 300-500 s. START.
+   - Zakladka "Pomiar": "Liczenie w zadanym czasie", np. 300-500 s. START (pomiar).
    - Po zakonczeniu kliknij "Zapamietaj jako tlo".
      Od teraz kazdy wynik pokazuje tez wartosc NETTO (po odjeciu tla).
 
@@ -292,7 +331,7 @@ Najedz mysza na pole lub przycisk, zeby zobaczyc podpowiedz.
      do schowka (np. do sprawozdania).
 
 3. STATYSTYKA (rozklad Poissona)
-   - Zakladka "Statystyka": np. 100 przedzialow po 1 s. "Start histogramu".
+   - Zakladka "Statystyka": np. 100 przedzialow po 1 s. START (histogram).
    - Dobierz dlugosc przedzialu (albo odleglosc zrodla), zeby srednio bylo 5-20 zliczen
      na przedzial - wtedy dobrze widac, ze rozklad nie jest symetryczny jak Gauss.
    - Program rysuje histogram, punkty rozkladu Poissona i krzywa Gaussa, a pod spodem:
@@ -300,31 +339,35 @@ Najedz mysza na pole lub przycisk, zeby zobaczyc podpowiedz.
        * test chi^2: p >= 0,05 -> dane zgodne z rozkladem Poissona.
 
 4. PLATEAU LICZNIKA
-   - Zakladka "Plateau". Zacznij od niskiego napiecia WN i zwiekszaj co 20-25 V.
-   - Przy kazdym napieciu: ustaw je na zasilaczu, wpisz w pole i "Zmierz punkt".
-   - Plateau to plaski fragment wykresu CPS(U). Program liczy jego nachylenie
-     (dobre liczniki: kilka %/100 V). Napiecie pracy wybierz ok. 1/3 dlugosci plateau.
+   - Zakladka "Plateau". Wpisz napiecie startowe (ponizej progu licznika) i krok, np. 20 V.
+   - Ustaw to napiecie na zasilaczu i START (punkt plateau). Po kazdym punkcie pole
+     "Napiecie WN" zwieksza sie o krok - ustaw nowe napiecie na zasilaczu i znowu START.
+   - Plateau to plaski fragment wykresu CPS(U). Program sam go znajduje (pomija prog
+     i wyladowanie), liczy nachylenie z niepewnoscia (dobre liczniki: kilka %/100 V)
+     i proponuje napiecie pracy (ok. 1/3 dlugosci plateau). Zakres mozna podac recznie.
    - NIE przekraczaj napiecia z karty katalogowej licznika (ciagle wyladowanie niszczy licznik).
 
 5. ZANIK (tylko zrodla krotkozyciowe)
-   - Zakladka "Zanik": wpisz tlo (wypelnia sie samo po kroku 1).
-   - Rodzaj pomiaru "Zanik", START. Parametry (liczba runow, przerwa, czas) sa z zakladki "Seria".
+   - Zakladka "Zanik": liczba pomiarow, czas pomiaru, przerwa i tlo (tlo wypelnia sie
+     samo po kroku 1). START (zanik).
    - Program dopasowuje prosta do ln(CPS - tlo), wazac punkty ich niepewnoscia,
      i podaje t1/2 z niepewnoscia.
    - Cs-137 ma t1/2 = 30 lat - jego zaniku w laboratorium nie zmierzysz.
      Typowe zrodlo do tego cwiczenia to Ba-137m (t1/2 ok. 2,6 min, z generatora izotopow):
-     np. 15-20 runow po 20-30 s bez przerwy.
+     np. 15-20 pomiarow po 20-30 s bez przerwy.
 
 6. CZAS MARTWY (metoda dwoch zrodel)
    - Potrzebne dwa silne zrodla (setki-tysiace CPS kazde).
-   - Zakladka "Czas martwy": zmierz kolejno  1) zrodlo 1,  2) oba zrodla,  3) zrodlo 2.
+   - Zakladka "Czas martwy": zmierz kolejno  1) zrodlo 1,  2) oba zrodla,  3) zrodlo 2
+     (START w tej zakladce wybiera sam nastepny krok).
      Zrodla NIE moga sie przesuwac miedzy pomiarami (zmienilaby sie geometria).
    - Przez straty w czasie martwym R(1+2) < R1 + R2 - tlo. Program liczy z tego tau
      z niepewnoscia. "Uzyj tau w korekcie" wpisuje wynik do zakladki "Urzadzenie".
    - Jesli tau wychodzi w granicach niepewnosci zera (albo ujemne), zrodla sa za slabe.
 
 7. ZAPIS WYNIKOW
-   - CSV z pomiarow: zakladka "Zapis" (wlacz PRZED pomiarem).
+   - CSV z pomiarow: zakladka "Zapis" (wlacz PRZED pomiarem). Plik moze byc otwarty
+     w Excelu tylko do odczytu - zamknij go w Excelu przed kolejnym pomiarem.
    - Statystyka, plateau i zanik: przyciski "Eksport CSV" i "Zapisz PNG" w zakladkach.
    - Wykres N(t): "Zapisz PNG" nad wykresem.
 
@@ -339,7 +382,8 @@ NIEPEWNOSCI - sciaga
      odroznic od tla - zmierz dluzej albo zbliz zrodlo.
    - Czas martwy tau (zakladka "Urzadzenie"): przy duzych tempach licznik gubi
      impulsy. Poprawione tempo: CPS / (1 - CPS * tau). Dla GM zwykle tau ~ 100 us
-     (zmierz je w zakladce "Czas martwy").
+     (zmierz je w zakladce "Czas martwy"). Gdy tau > 0, wynik i netto sa podawane
+     tez po tej korekcie.
    - Zanik: u(t1/2) = t1/2 * u(lambda) / lambda.
 """
 
@@ -406,20 +450,20 @@ class DAQCounterApp(tk.Tk):
         self.counter_channel = tk.StringVar(value="Dev1/ctr0")
         self.pfi_term = tk.StringVar(value="PFI0")
 
-        # rodzaj pomiaru: pojedynczy / seria
-        self.measurement_kind = tk.StringVar(value="Pojedynczy")
-
-        # tryb pomiaru: time / counts
+        # tryb pomiaru z zakladki Pomiar: time / counts
         self.mode = tk.StringVar(value="time")
+        # tryb biezacego pomiaru (plateau/histogram/czas martwy/zanik zawsze licza na czas,
+        # bez przestawiania wyboru w zakladce Pomiar)
+        self._run_mode = "time"
         self.time_value = tk.DoubleVar(value=10.0)
         self.time_unit = tk.StringVar(value="s")
         self.target_counts = tk.IntVar(value=100)
 
         # zmienne wynikowe
         self.current_counts = tk.IntVar(value=0)
-        self.elapsed_time = tk.DoubleVar(value=0.0)
-        self.sqrt_counts = tk.DoubleVar(value=0.0)
-        self.cps_value = tk.StringVar(value="0.000")
+        self.elapsed_time = tk.StringVar(value="0,0")
+        self.sqrt_counts = tk.StringVar(value="0")
+        self.cps_value = tk.StringVar(value="0,00")
 
         # sterowanie zadaniem DAQ
         self.running = False
@@ -438,6 +482,8 @@ class DAQCounterApp(tk.Tk):
         self.csv_path = tk.StringVar(value="")
         self.csv_file = None
         self.csv_writer = None
+        self._csv_measure_no = 0
+        self._csv_failed = False
         self.log_interval_ms = 200
         self._last_log_t = 0.0
 
@@ -460,6 +506,7 @@ class DAQCounterApp(tk.Tk):
         self.series_active = False
         self.series_index = 0
         self.series_results = []
+        self._series_cfg = {"runs": 0, "pause": 0.0, "time_s": None}
 
         # ostatnie wartosci surowe (do zapisu runa)
         self._last_counts = 0
@@ -468,12 +515,19 @@ class DAQCounterApp(tk.Tk):
         # PLATEAU (CPS vs napiecie)
         self.plateau_voltage = tk.DoubleVar(value=400.0)
         self.plateau_time_s = tk.DoubleVar(value=10.0)
+        self.plateau_step_v = tk.DoubleVar(value=20.0)
+        self.plateau_from_v = tk.StringVar(value="")     # puste = zakres plateau wykryty automatycznie
+        self.plateau_to_v = tk.StringVar(value="")
+        self._plateau_fit = None
         self.plateau_active = False
         self._plateau_voltage_pending = 0.0
         self.plateau_points = []          # (V, N, t, CPS, err)
 
         # ZANIK (dopasowanie t polowkowego)
         self.decay_bg_cps = tk.DoubleVar(value=0.0)
+        self.decay_runs = tk.IntVar(value=15)
+        self.decay_time_s = tk.DoubleVar(value=20.0)
+        self.decay_pause_s = tk.DoubleVar(value=0.0)
         self._is_decay = False
         self._series_start_perf = None
         self._decay_t = []
@@ -727,8 +781,9 @@ class DAQCounterApp(tk.Tk):
             "O programie",
             "Geiger-Muller - NI USB-6210\n\n"
             "Zliczanie impulsow licznika GM przez sprzetowy licznik karty.\n"
-            "Tryb NI-DAQ (Windows + sterownik) lub symulator (do testow).\n"
-            "Pomiar pojedynczy i serie, wykres N(t), zapis CSV.\n\n"
+            "Tryb NI-DAQ (Windows + sterownik) lub symulator (do cwiczen bez karty).\n"
+            "Pomiar, seria, statystyka (histogram, test chi^2), plateau,\n"
+            "zanik (t1/2), czas martwy (metoda dwoch zrodel), zapis CSV/PNG.\n\n"
             f"NI-DAQ w tym Pythonie: {'dostepne' if NIDAQ_AVAILABLE else 'BRAK (symulator)'}"
         )
 
@@ -860,7 +915,7 @@ class DAQCounterApp(tk.Tk):
 
     def _update_expected_end_times(self, from_series: bool):
         now = datetime.now()
-        is_time = (self.mode.get() == "time")
+        is_time = (self._run_mode == "time")
         run_s = float(self.target_time_s or 0.0)
 
         # Pojedynczy run
@@ -872,8 +927,8 @@ class DAQCounterApp(tk.Tk):
 
         # Cala seria - liczona od biezacego runa do konca (bez rosniecia w czasie)
         if from_series and is_time:
-            runs = int(self.series_runs.get())
-            pause = float(self.series_pause_s.get())
+            runs = self._series_cfg["runs"]
+            pause = self._series_cfg["pause"]
             runs_left_after = max(0, runs - self.series_index)  # runy po biezacym
             total = run_s + runs_left_after * (run_s + pause)
             series_end_dt = now + timedelta(seconds=total)
@@ -908,12 +963,20 @@ class DAQCounterApp(tk.Tk):
         paned.add(left, weight=0)
         paned.add(right, weight=1)
 
-        left.grid_rowconfigure(1, weight=1)
+        left.grid_rowconfigure(2, weight=1)
         left.grid_columnconfigure(0, weight=1)
+
+        # --- BANER SYMULATORA: nie da sie przeoczyc, ze dane sa losowane ---
+        self.sim_banner = tk.Label(
+            left, text="TRYB SYMULATORA - zliczenia sa losowane, to NIE sa dane z licznika.\n"
+                       "Wylaczysz go w zakladce Urzadzenie.",
+            bg="#FEF3C7", fg="#92400E", font=(self.font_family, 10, "bold"),
+            justify="left", anchor="w", padx=10, pady=6, relief="solid", bd=1)
+        self.sim_banner.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
 
         # --- WYNIKI NA ZYWO (duze liczby) ---
         frame_results = ttk.LabelFrame(left, text="Wyniki (na zywo)", style="Card.TLabelframe")
-        frame_results.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 8))
+        frame_results.grid(row=1, column=0, sticky="ew", padx=6, pady=(6, 8))
         for c in range(3):
             frame_results.grid_columnconfigure(c, weight=1)
 
@@ -986,9 +1049,10 @@ class DAQCounterApp(tk.Tk):
 
         # --- ZAKLADKI USTAWIEN (przewijane na malych ekranach) ---
         nb_scroll, nb_holder = self._make_scrollable(left)
-        nb_scroll.grid(row=1, column=0, sticky="nsew", padx=6, pady=0)
+        nb_scroll.grid(row=2, column=0, sticky="nsew", padx=6, pady=0)
         nb = ttk.Notebook(nb_holder)
         nb.pack(fill="both", expand=True)
+        self.nb = nb
 
         tab_measure = ttk.Frame(nb)
         tab_series = ttk.Frame(nb)
@@ -1007,19 +1071,18 @@ class DAQCounterApp(tk.Tk):
         nb.add(tab_dead, text="Czas martwy")
         nb.add(tab_device, text="Urzadzenie")
         nb.add(tab_csv, text="Zapis")
+        self._tabs = {"measure": tab_measure, "series": tab_series, "stats": tab_stats,
+                      "plateau": tab_plateau, "decay": tab_decay, "dead": tab_dead,
+                      "device": tab_device, "csv": tab_csv}
+        nb.bind("<<NotebookTabChanged>>", lambda e: self._sync_start_label())
 
         # TAB: Pomiar
         tab_measure.grid_columnconfigure(1, weight=1)
 
-        kind_row = ttk.Frame(tab_measure)
-        kind_row.grid(row=0, column=0, columnspan=3, sticky="ew", padx=8, pady=(10, 6))
-        kind_row.grid_columnconfigure(1, weight=1)
-
-        ttk.Label(kind_row, text="Rodzaj:").grid(row=0, column=0, sticky="w")
-        self.cb_kind = ttk.Combobox(kind_row, textvariable=self.measurement_kind,
-                                    values=["Pojedynczy", "Seria", "Zanik"], state="readonly", width=14)
-        self.cb_kind.grid(row=0, column=1, sticky="w", padx=6)
-        self.cb_kind.bind("<<ComboboxSelected>>", lambda e: self._sync_start_label())
+        ttk.Label(tab_measure, style="Muted.TLabel", wraplength=600, justify="left",
+                  text="Zwykly pomiar: ustaw tryb i kliknij START (albo SPACJA). Przycisk START "
+                       "robi to, co jest w aktualnie otwartej zakladce - napis na nim to pokazuje.").grid(
+            row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(10, 0))
 
         frame_mode = ttk.LabelFrame(tab_measure, text="Tryb zliczania", style="Card.TLabelframe")
         frame_mode.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
@@ -1055,13 +1118,22 @@ class DAQCounterApp(tk.Tk):
         series_top.grid_columnconfigure(1, weight=1)
         series_top.grid_columnconfigure(3, weight=1)
 
-        ttk.Label(series_top, text="Liczba runow:").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=6)
+        ttk.Label(series_top, text="Liczba pomiarow:").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=6)
         self.e_runs = ttk.Entry(series_top, textvariable=self.series_runs, width=10)
         self.e_runs.grid(row=0, column=1, sticky="w", pady=6)
 
         ttk.Label(series_top, text="Przerwa [s]:").grid(row=0, column=2, sticky="e", padx=(12, 4), pady=6)
         self.e_pause = ttk.Entry(series_top, textvariable=self.series_pause_s, width=10)
         self.e_pause.grid(row=0, column=3, sticky="w", pady=6)
+        ttk.Label(series_top, style="Muted.TLabel", text="Czas lub N kazdego pomiaru - jak w zakladce Pomiar.").grid(
+            row=1, column=0, columnspan=4, sticky="w", padx=8)
+        series_btns = ttk.Frame(series_top)
+        series_btns.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(6, 8))
+        self.btn_series_start = ttk.Button(series_btns, text="Start serii", style="Accent.TButton",
+                                           command=self.start_series)
+        self.btn_series_start.pack(side="left")
+        self.btn_series_clear = ttk.Button(series_btns, text="Wyczysc tabele", command=self.clear_series_results)
+        self.btn_series_clear.pack(side="left", padx=(8, 0))
 
         self.lbl_series_progress = ttk.Label(tab_series, text="Seria: -")
         self.lbl_series_progress.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
@@ -1073,7 +1145,7 @@ class DAQCounterApp(tk.Tk):
 
         columns = ("run", "mode", "t", "n", "cps")
         self.series_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=8)
-        self.series_table.heading("run", text="Run")
+        self.series_table.heading("run", text="Nr")
         self.series_table.heading("mode", text="Tryb")
         self.series_table.heading("t", text="Czas [s]")
         self.series_table.heading("n", text="N")
@@ -1141,7 +1213,7 @@ class DAQCounterApp(tk.Tk):
         self.btn_pick = ttk.Button(csv_box, text="Wybierz plik CSV", command=self.pick_csv_file)
         self.btn_pick.grid(row=0, column=1, sticky="e", padx=8, pady=(8, 4))
 
-        lbl_path = ttk.Label(csv_box, textvariable=self.csv_path, anchor="w", justify="left")
+        lbl_path = ttk.Label(csv_box, textvariable=self.csv_path, anchor="w", justify="left", wraplength=560)
         lbl_path.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
         ttk.Label(csv_box, text="Kolejne pomiary sa dopisywane na koniec pliku (nic nie jest nadpisywane).",
                   style="Muted.TLabel", wraplength=360, justify="left").grid(
@@ -1196,7 +1268,7 @@ class DAQCounterApp(tk.Tk):
         bottom.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
         bottom.grid_columnconfigure(2, weight=1)
 
-        self.btn_start = ttk.Button(bottom, text="START (pojedynczy)",
+        self.btn_start = ttk.Button(bottom, text="START (pomiar)", width=26,
                                     command=self.start_selected, style="Accent.TButton")
         self.btn_start.grid(row=0, column=0, padx=(0, 8), pady=6, sticky="w")
 
@@ -1215,31 +1287,29 @@ class DAQCounterApp(tk.Tk):
                                                 command=self.toggle_csv_logging, style="Neutral.TButton")
         self.btn_csv_toggle_bottom.grid(row=0, column=4, padx=(0, 8), pady=6, sticky="w")
 
-        ttk.Button(bottom, text="Wyczysc serie", command=self.clear_series_results).grid(
-            row=0, column=5, padx=(0, 8), pady=6, sticky="w")
-
         self.btn_help = ttk.Button(bottom, text="Instrukcja (F1)", command=self.show_instructions)
-        self.btn_help.grid(row=0, column=6, padx=(0, 8), pady=6, sticky="w")
+        self.btn_help.grid(row=0, column=5, padx=(0, 8), pady=6, sticky="w")
 
         ttk.Button(bottom, text="Zakoncz", command=self.on_close).grid(
-            row=0, column=7, padx=(0, 0), pady=6, sticky="e")
+            row=0, column=6, padx=(0, 0), pady=6, sticky="e")
 
         status_line = ttk.Label(bottom, textvariable=self.status, anchor="w", style="Muted.TLabel")
-        status_line.grid(row=1, column=0, columnspan=8, sticky="ew", pady=(0, 6))
+        status_line.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(0, 6))
 
         # rzeczy blokowane podczas pomiaru
         self._lock_widgets = [
-            self.cb_kind,
             self.e_channel, self.btn_refresh_dev, self.e_pfi, self.cb_sim, self.e_rate, self.e_tau,
             self.rb_time, self.e_time, self.om_unit, self.rb_counts, self.e_counts,
             self.cb_csv, self.btn_pick, self.btn_csv_pick_bottom, self.btn_csv_toggle_bottom,
-            self.e_runs, self.e_pause,
-            self.btn_plateau, self.e_pl_voltage, self.e_pl_time, self.e_decay_bg,
+            self.e_runs, self.e_pause, self.btn_series_start, self.btn_series_clear,
+            self.btn_plateau, self.btn_plateau_clear, self.e_pl_voltage, self.e_pl_time, self.e_pl_step,
+            self.e_pl_from, self.e_pl_to,
+            self.e_decay_bg, self.e_decay_runs, self.e_decay_time, self.e_decay_pause, self.btn_decay_start,
             self.btn_bg_save, self.btn_bg_clear,
-            self.btn_hist_start, self.e_hist_n, self.e_hist_t,
-            self.e_dt_time, self.btn_dt_use, *self._dt_buttons.values(),
+            self.btn_hist_start, self.btn_hist_clear, self.e_hist_n, self.e_hist_t,
+            self.e_dt_time, self.btn_dt_use, self.btn_dt_clear, *self._dt_buttons.values(),
         ]
-        self._readonly_combos = (self.cb_kind, self.om_unit)
+        self._readonly_combos = (self.om_unit,)
 
         found = self.refresh_devices(show_errors=False)
         if NIDAQ_AVAILABLE and not found:
@@ -1306,29 +1376,59 @@ class DAQCounterApp(tk.Tk):
             self.bind_all(seq, _on_wheel, add="+")
         return outer, inner
 
+    def _active_tab(self) -> str:
+        try:
+            current = self.nb.nametowidget(self.nb.select())
+        except Exception:
+            return "measure"
+        for key, frame in self._tabs.items():
+            if frame is current:
+                return key
+        return "measure"
+
+    def _next_dt_step(self):
+        for key, title, _hint in self.DT_STEPS:
+            if key not in self._dt_data:
+                return key, title
+        return self.DT_STEPS[0][0], self.DT_STEPS[0][1]
+
     def _sync_start_label(self):
-        kind = self.measurement_kind.get()
-        if kind == "Seria":
-            self.btn_start.configure(text="START (seria)")
-        elif kind == "Zanik":
-            self.btn_start.configure(text="START (zanik)")
+        """START robi to, co jest w otwartej zakladce - napis na przycisku to pokazuje."""
+        tab = self._active_tab()
+        if tab == "series":
+            text = "START (seria)"
+        elif tab == "stats":
+            text = "START (histogram)"
+        elif tab == "plateau":
+            text = "START (punkt plateau)"
+        elif tab == "decay":
+            text = "START (zanik)"
+        elif tab == "dead":
+            text = f"START ({self._next_dt_step()[1].split('. ', 1)[-1].lower()})"
         else:
-            self.btn_start.configure(text="START (pojedynczy)")
+            text = "START (pomiar)"
+        self.btn_start.configure(text=text)
 
     def start_selected(self):
-        if self.running or self.series_active or self.plateau_active or self._closing:
-            return
-        if not self._normalize_inputs():
-            return
-        if not self._confirm_csv():
-            return
-        kind = self.measurement_kind.get()
-        if kind == "Seria":
+        tab = self._active_tab()
+        if tab == "series":
             self.start_series()
-        elif kind == "Zanik":
-            self.start_series(decay=True)
+        elif tab == "stats":
+            self.start_histogram()
+        elif tab == "plateau":
+            self.start_plateau_point()
+        elif tab == "decay":
+            self.start_decay()
+        elif tab == "dead":
+            self.start_deadtime_step(self._next_dt_step()[0])
         else:
             self.start_measurement()
+
+    def _can_start(self) -> bool:
+        """Wspolne dla kazdego startu: nic nie trwa i wszystkie pola liczbowe sa poprawne."""
+        if self.running or self.series_active or self._closing:
+            return False
+        return self._normalize_inputs()
 
     # ---------------------------------------------------------------
     # POLA LICZBOWE (przecinek albo kropka)
@@ -1353,10 +1453,14 @@ class DAQCounterApp(tk.Tk):
         fields = [
             (self.time_value, "Czas (zakladka Pomiar)", False),
             (self.target_counts, "N (zakladka Pomiar)", True),
-            (self.series_runs, "Liczba runow (zakladka Seria)", True),
+            (self.series_runs, "Liczba pomiarow (zakladka Seria)", True),
             (self.series_pause_s, "Przerwa (zakladka Seria)", False),
             (self.plateau_voltage, "Napiecie WN (zakladka Plateau)", False),
             (self.plateau_time_s, "Czas na punkt (zakladka Plateau)", False),
+            (self.plateau_step_v, "Krok (zakladka Plateau)", False),
+            (self.decay_runs, "Liczba pomiarow (zakladka Zanik)", True),
+            (self.decay_time_s, "Czas pomiaru (zakladka Zanik)", False),
+            (self.decay_pause_s, "Przerwa (zakladka Zanik)", False),
             (self.decay_bg_cps, "Tlo CPS (zakladka Zanik)", False),
             (self.sim_rate_cps, "Szybkosc CPS (zakladka Urzadzenie)", False),
             (self.dead_time_us, "Czas martwy (zakladka Urzadzenie)", False),
@@ -1395,6 +1499,24 @@ class DAQCounterApp(tk.Tk):
     # ---------------------------------------------------------------
     # WYNIK Z NIEPEWNOSCIA / TLO
     # ---------------------------------------------------------------
+    def _dead_time_corr(self, cps: float, u: float):
+        """(CPS, u) po korekcie czasu martwego albo None, gdy tau = 0 lub licznik przeciazony."""
+        tau = float(self.dead_time_us.get()) * 1e-6
+        if tau <= 0 or cps * tau >= 1.0:
+            return None
+        k = 1.0 - cps * tau
+        return cps / k, u / (k * k)
+
+    def _net_cps(self, cps: float, u: float):
+        """(CPS netto, u) po odjeciu zapisanego tla (i korekcie czasu martwego, jesli tau > 0)."""
+        if self._bg is None:
+            return None
+        bg, u_bg = self._bg[0], self._bg[1]
+        corr, corr_bg = self._dead_time_corr(cps, u), self._dead_time_corr(bg, u_bg)
+        if corr is not None and corr_bg is not None:
+            (cps, u), (bg, u_bg) = corr, corr_bg
+        return cps - bg, math.sqrt(u * u + u_bg * u_bg)
+
     def _refresh_result_lines(self, n: int, t: float, prefix: str = ""):
         if t <= 0:
             self.result_text.set("Wynik: -")
@@ -1404,22 +1526,28 @@ class DAQCounterApp(tk.Tk):
         u_n = math.sqrt(n)
         cps, u_cps = n / t, u_n / t
         rel = f"   (niepewnosc wzgl. {_fmt_pl(100.0 / u_n, 1)}%)" if n > 0 else ""
-        self.result_text.set(f"{prefix}N = {_fmt_unc(n, u_n, integer=True)}   t = {_fmt_pl(t, 1)} s   "
-                             f"CPS = {_fmt_unc(cps, u_cps)}{rel}")
+        text = (f"{prefix}N = {_fmt_unc(n, u_n, integer=True)}   t = {_fmt_pl(t, 1)} s   "
+                f"CPS = {_fmt_unc(cps, u_cps)}{rel}")
+        corr = self._dead_time_corr(cps, u_cps)
+        if corr is not None:
+            text += f"\nCPS po korekcie czasu martwego = {_fmt_unc(*corr)}"
+        self.result_text.set(text)
 
-        if self._bg is None:
+        net = self._net_cps(cps, u_cps)
+        if net is None:
             self.net_text.set("Netto: najpierw zmierz tlo i kliknij \"Zapamietaj jako tlo\".")
             return
-        bg_cps, bg_u = self._bg[0], self._bg[1]
-        net = cps - bg_cps
-        u_net = math.sqrt(u_cps ** 2 + bg_u ** 2)
+        net_v, u_net = net
         verdict = ""
         if u_net > 0:
-            if abs(net) < 2 * u_net:
+            if abs(net_v) < 2 * u_net:
                 verdict = "  - w granicach niepewnosci to samo co tlo"
-            elif bg_cps > 0:
-                verdict = f"  - ok. {_fmt_pl(cps / bg_cps, 1)}x wiecej niz tlo"
-        self.net_text.set(f"CPS netto (po odjeciu tla) = {_fmt_unc(net, u_net)}{verdict}")
+            elif net_v < 0:
+                verdict = "  - MNIEJ niz tlo: sprawdz, czy tlo bylo mierzone bez zrodla"
+            elif self._bg[0] > 0:
+                verdict = f"  - ok. {_fmt_pl(cps / self._bg[0], 1)}x wiecej niz tlo"
+        label = "CPS netto (po odjeciu tla" + (" i korekcie czasu martwego)" if corr is not None else ")")
+        self.net_text.set(f"{label} = {_fmt_unc(net_v, u_net)}{verdict}")
 
     def save_background(self):
         if self.running or self.series_active:
@@ -1474,14 +1602,12 @@ class DAQCounterApp(tk.Tk):
 
     def _add_tooltips(self):
         tips = [
-            (self.cb_kind, "Pojedynczy - jeden pomiar.\nSeria - kilka pomiarow pod rzad (zakladka Seria).\n"
-                           "Zanik - seria z dopasowaniem czasu polowicznego zaniku (zakladka Zanik)."),
             (self.rb_time, "Licznik liczy impulsy przez zadany czas. Najczestszy tryb."),
             (self.e_time, "Dluzszy pomiar = mniejsza niepewnosc wzgledna (1/sqrt(N)).\n"
                           "Tlo: 300-500 s, zrodlo: 30-120 s."),
             (self.rb_counts, "Pomiar trwa, az licznik zliczy N impulsow. Daje stala niepewnosc wzgledna 1/sqrt(N)."),
             (self.e_counts, "Np. 100 impulsow -> niepewnosc 10%, 10 000 -> 1%."),
-            (self.e_runs, "Ile pomiarow wykonac pod rzad."),
+            (self.e_runs, "Ile pomiarow wykonac pod rzad. Kazdy trwa tyle, ile ustawiono w zakladce Pomiar."),
             (self.e_pause, "Przerwa miedzy pomiarami serii (w sekundach)."),
             (self.e_channel, "Licznik sprzetowy karty NI, ktory liczy impulsy (np. Dev1/ctr0).\n"
                              "Lista pokazuje liczniki wykryte przez sterownik."),
@@ -1493,12 +1619,23 @@ class DAQCounterApp(tk.Tk):
             (self.e_rate, "Srednie tempo zliczen w symulatorze (impulsy na sekunde)."),
             (self.e_tau, "Czas martwy licznika w mikrosekundach (dla GM zwykle ~100 us).\n"
                          "0 = bez korekty. Program pokazuje wtedy \"CPS popr.\"."),
-            (self.e_pl_voltage, "Wpisz napiecie ustawione WLASNIE na zasilaczu WN - program go nie ustawia sam."),
+            (self.e_pl_voltage, "Napiecie ustawione WLASNIE na zasilaczu WN - program go nie ustawia sam."),
+            (self.e_pl_step, "Po kazdym punkcie pole \"Napiecie WN\" zwieksza sie o krok.\n"
+                             "Wtedy ustaw nowe napiecie na zasilaczu. 0 = nie zmieniaj."),
+            (self.e_pl_from, "Poczatek plateau. Puste = program sam szuka plaskiego odcinka."),
+            (self.e_pl_to, "Koniec plateau. Puste = program sam szuka plaskiego odcinka."),
+            (self.e_decay_runs, "Ile pomiarow wykonac (min. 3). Dla Ba-137m np. 15."),
+            (self.e_decay_time, "Czas jednego pomiaru. Krotszy = wiecej punktow, ale wieksza niepewnosc."),
+            (self.e_decay_pause, "Przerwa miedzy pomiarami. Zwykle 0."),
+            (self.btn_decay_start, "Seria pomiarow i dopasowanie t1/2 (albo START w tej zakladce)."),
+            (self.btn_series_start, "Seria pomiarow (albo START w tej zakladce)."),
             (self.e_pl_time, "Czas pomiaru jednego punktu plateau."),
             (self.btn_plateau, "Zmierz jeden punkt: CPS przy aktualnym napieciu."),
             (self.e_decay_bg, "Tlo w CPS odejmowane przed dopasowaniem.\nWypelnia sie samo po \"Zapamietaj jako tlo\"."),
             (self.cb_csv, "Wlacz PRZED pomiarem, zeby zapisac wyniki. Kolejne pomiary sa dopisywane do pliku."),
-            (self.btn_start, "Start pomiaru (albo SPACJA). Rodzaj wybierasz w zakladce Pomiar."),
+            (self.btn_start, "Start (albo SPACJA). Robi to, co jest w otwartej zakladce:\n"
+                             "Pomiar - zwykly pomiar, Seria - seria, Statystyka - histogram,\n"
+                             "Plateau - punkt plateau, Zanik - zanik, Czas martwy - nastepny krok."),
             (self.btn_stop, "Przerywa pomiar (albo SPACJA). W serii przerywa cala serie."),
             (self.btn_reset, "Zeruje wyniki i wykres (nie kasuje zapisanego tla)."),
             (self.btn_bg_save, "Po pomiarze BEZ zrodla: zapamietaj go jako tlo.\n"
@@ -1554,30 +1691,45 @@ class DAQCounterApp(tk.Tk):
 
         box = ttk.LabelFrame(parent, text="Punkt plateau", style="Card.TLabelframe")
         box.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 8))
-        box.grid_columnconfigure(1, weight=1)
+        box.grid_columnconfigure(3, weight=1)
 
         ttk.Label(box, text="Napiecie WN [V]:").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=6)
         self.e_pl_voltage = ttk.Entry(box, textvariable=self.plateau_voltage, width=10)
         self.e_pl_voltage.grid(row=0, column=1, sticky="w", pady=6)
+        ttk.Label(box, text="Krok [V]:").grid(row=0, column=2, sticky="e", padx=(12, 4), pady=6)
+        self.e_pl_step = ttk.Entry(box, textvariable=self.plateau_step_v, width=8)
+        self.e_pl_step.grid(row=0, column=3, sticky="w", pady=6)
 
         ttk.Label(box, text="Czas na punkt [s]:").grid(row=1, column=0, sticky="e", padx=(8, 4), pady=6)
         self.e_pl_time = ttk.Entry(box, textvariable=self.plateau_time_s, width=10)
         self.e_pl_time.grid(row=1, column=1, sticky="w", pady=6)
 
-        self.btn_plateau = ttk.Button(box, text="Zmierz punkt", command=self.start_plateau_point,
+        btns = ttk.Frame(box)
+        btns.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(4, 6))
+        self.btn_plateau = ttk.Button(btns, text="Zmierz punkt", command=self.start_plateau_point,
                                       style="Accent.TButton")
-        self.btn_plateau.grid(row=2, column=0, padx=8, pady=(4, 8), sticky="w")
-        ttk.Button(box, text="Wyczysc", command=self.clear_plateau).grid(
-            row=2, column=1, padx=8, pady=(4, 8), sticky="w")
-
-        pl_export = ttk.Frame(box)
-        pl_export.grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
-        ttk.Button(pl_export, text="Eksport CSV", command=self.export_plateau_csv).pack(side="left")
-        ttk.Button(pl_export, text="Zapisz PNG",
+        self.btn_plateau.pack(side="left")
+        self.btn_plateau_clear = ttk.Button(btns, text="Wyczysc", command=self.clear_plateau)
+        self.btn_plateau_clear.pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Eksport CSV", command=self.export_plateau_csv).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Zapisz PNG",
                    command=lambda: self._save_figure_png(self.pl_fig, "plateau")).pack(side="left", padx=(8, 0))
 
-        self.lbl_plateau_info = ttk.Label(parent, text="Ustaw napiecie na zasilaczu, potem zmierz punkt.",
-                                          style="Muted.TLabel")
+        rng = ttk.Frame(box)
+        rng.grid(row=3, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
+        ttk.Label(rng, text="Zakres plateau [V]: od").pack(side="left")
+        self.e_pl_from = ttk.Entry(rng, textvariable=self.plateau_from_v, width=7)
+        self.e_pl_from.pack(side="left", padx=4)
+        ttk.Label(rng, text="do").pack(side="left")
+        self.e_pl_to = ttk.Entry(rng, textvariable=self.plateau_to_v, width=7)
+        self.e_pl_to.pack(side="left", padx=4)
+        ttk.Button(rng, text="Przelicz", style="Small.TButton", command=self._redraw_plateau).pack(side="left", padx=(4, 0))
+        ttk.Label(rng, text="(puste = automatycznie)", style="Muted.TLabel").pack(side="left", padx=(8, 0))
+        for e in (self.e_pl_from, self.e_pl_to):
+            e.bind("<Return>", lambda _e: self._redraw_plateau())
+
+        self.lbl_plateau_info = ttk.Label(parent, text=self.PLATEAU_HINT, style="Muted.TLabel",
+                                          wraplength=600, justify="left")
         self.lbl_plateau_info.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
 
         mid = ttk.Frame(parent)
@@ -1585,10 +1737,10 @@ class DAQCounterApp(tk.Tk):
         mid.grid_rowconfigure(0, weight=1)
         mid.grid_columnconfigure(0, weight=1)
 
-        cols = ("v", "n", "t", "cps", "err")
+        cols = ("v", "n", "t", "cps", "err", "pl")
         self.plateau_table = ttk.Treeview(mid, columns=cols, show="headings", height=5)
-        for c, txt, w in (("v", "V", 70), ("n", "N", 70), ("t", "t [s]", 70),
-                          ("cps", "CPS", 90), ("err", "+/-", 70)):
+        for c, txt, w in (("v", "U [V]", 70), ("n", "N", 70), ("t", "t [s]", 70),
+                          ("cps", "CPS", 80), ("err", "\u00b1", 70), ("pl", "plateau", 70)):
             self.plateau_table.heading(c, text=txt)
             self.plateau_table.column(c, width=w, anchor="e")
         self.plateau_table.grid(row=0, column=0, sticky="nsew")
@@ -1596,7 +1748,7 @@ class DAQCounterApp(tk.Tk):
         self.plateau_table.configure(yscrollcommand=pls.set)
         pls.grid(row=0, column=1, sticky="ns")
 
-        self.pl_fig = Figure(figsize=(3.6, 2.2), dpi=100)
+        self.pl_fig = Figure(figsize=(3.6, 2.4), dpi=100)
         self.pl_fig.patch.set_facecolor(self.ui["card"])
         self.pl_ax = self.pl_fig.add_subplot(111)
         self._style_ax(self.pl_ax, "Napiecie [V]", "CPS")
@@ -1604,37 +1756,33 @@ class DAQCounterApp(tk.Tk):
         self.pl_canvas.get_tk_widget().grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
         mid.grid_rowconfigure(1, weight=1)
 
+    PLATEAU_HINT = ("Zacznij ponizej progu licznika i zwiekszaj napiecie o krok. Przed kazdym punktem "
+                    "ustaw na zasilaczu napiecie z pola \"Napiecie WN\".")
+
     def clear_plateau(self):
         self.plateau_points = []
-        for it in self.plateau_table.get_children():
-            self.plateau_table.delete(it)
-        self.lbl_plateau_info.configure(text="Ustaw napiecie na zasilaczu, potem zmierz punkt.")
         self._redraw_plateau()
 
     def start_plateau_point(self):
-        if self.running or self.series_active or self.plateau_active or self._closing:
+        if not self._can_start():
             return
-        if not self._normalize_inputs():
+        V = float(self.plateau_voltage.get())
+        tp = float(self.plateau_time_s.get())
+        if tp <= 0:
+            messagebox.showerror("Plateau", "Czas na punkt musi byc > 0.")
             return
-        try:
-            V = float(self.plateau_voltage.get())
-            tp = float(self.plateau_time_s.get())
-            if tp <= 0:
-                raise ValueError("Czas na punkt musi byc > 0.")
-        except Exception as e:
-            messagebox.showerror("Plateau", str(e))
+        if not self._confirm_csv():
             return
-
-        self.mode.set("time")
         self._plateau_voltage_pending = V
         self.plateau_active = True
         self.stop_task()
         self._close_csv()
-        ok = self._start_run_internal(from_series=False, override_time_s=tp)
-        if not ok:
+        if not self._open_csv_for("plateau", f"U_V={_fmt_pl(V, 1)}", f"czas_s={_fmt_pl(tp, 3)}") or \
+                not self._start_run_internal(from_series=False, override_time_s=tp):
             self.plateau_active = False
-        else:
-            self.status.set(f"Plateau: pomiar przy {V:.0f} V...")
+            self._close_csv()
+            return
+        self.status.set(f"Plateau: pomiar przy {_fmt_pl(V, 0)} V...")
 
     def _store_plateau_point(self):
         V = float(self._plateau_voltage_pending)
@@ -1643,29 +1791,80 @@ class DAQCounterApp(tk.Tk):
         cps = (n / t) if t > 0 else 0.0
         err = (math.sqrt(max(n, 0)) / t) if t > 0 else 0.0
         self.plateau_points.append((V, n, t, cps, err))
-        self.plateau_table.insert("", "end",
-                                  values=(f"{V:.0f}", n, f"{t:.2f}", f"{cps:.2f}", f"{err:.2f}"))
         self._redraw_plateau()
+        step = float(self.plateau_step_v.get())
+        if step > 0:
+            nxt = V + step
+            self.plateau_voltage.set(round(nxt, 3))
+            self.after_idle(lambda: self.status.set(
+                f"Plateau: zapisano punkt {_fmt_pl(V, 0)} V. Ustaw teraz {_fmt_pl(nxt, 0)} V na zasilaczu "
+                "i kliknij START (albo SPACJA)."))
+
+    def _plateau_analysis(self):
+        """Zwraca (pts, (i_od, i_do) albo None, opis zakresu, blad albo None). pts posortowane po U."""
+        pts = sorted(self.plateau_points, key=lambda p: p[0])
+        raw_from, raw_to = self.plateau_from_v.get().strip(), self.plateau_to_v.get().strip()
+        if not raw_from and not raw_to:
+            rng = _plateau_auto_range([(p[0], p[3], p[4]) for p in pts])
+            return pts, rng, "wykryty automatycznie", None
+        try:
+            lo = float(raw_from.replace(",", ".")) if raw_from else -math.inf
+            hi = float(raw_to.replace(",", ".")) if raw_to else math.inf
+        except ValueError:
+            return pts, None, "", "Zakres plateau: wpisz liczby (np. 400 i 560) albo zostaw puste."
+        idx = [i for i, p in enumerate(pts) if lo <= p[0] <= hi]
+        if len(idx) < 2:
+            return pts, None, "", "W podanym zakresie sa mniej niz 2 punkty."
+        return pts, (idx[0], idx[-1]), "podany recznie", None
 
     def _redraw_plateau(self):
+        pts, rng, how, err_msg = self._plateau_analysis()
+        self._plateau_fit = None
+        for it in self.plateau_table.get_children():
+            self.plateau_table.delete(it)
+        for i, (V, n, t, cps, err) in enumerate(pts):
+            in_pl = rng is not None and rng[0] <= i <= rng[1]
+            self.plateau_table.insert("", "end", values=(_fmt_pl(V, 0), n, _fmt_pl(t, 1), _fmt_pl(cps, 2),
+                                                         _fmt_pl(err, 2), "tak" if in_pl else ""))
+
+        if not pts:
+            info = self.PLATEAU_HINT
+        elif err_msg:
+            info = err_msg
+        elif rng is None:
+            info = (f"Punktow: {len(pts)}. Nie widac jeszcze plaskiego odcinka - zmierz wiecej punktow "
+                    "(albo podaj zakres plateau recznie).")
+        else:
+            sub = pts[rng[0]:rng[1] + 1]
+            res = _plateau_slope([(p[0], p[3], p[4]) for p in sub])
+            u_lo, u_hi = sub[0][0], sub[-1][0]
+            u_work = u_lo + (u_hi - u_lo) / 3.0
+            info = (f"Plateau ({how}): {_fmt_pl(u_lo, 0)}-{_fmt_pl(u_hi, 0)} V, dlugosc {_fmt_pl(u_hi - u_lo, 0)} V, "
+                    f"{len(sub)} punktow.")
+            if res is not None:
+                pct, u_pct, a, b = res
+                self._plateau_fit = {"od": u_lo, "do": u_hi, "pct": pct, "u_pct": u_pct, "a": a, "b": b,
+                                     "work": u_work, "how": how}
+                info += (f"\nNachylenie plateau = {_fmt_unc(pct, u_pct)} %/100 V.   "
+                         f"Proponowane napiecie pracy (1/3 plateau): ok. {_fmt_pl(u_work, 0)} V.")
+        self.lbl_plateau_info.configure(text=info)
+
         try:
-            self.pl_ax.clear()
-            self._style_ax(self.pl_ax, "Napiecie [V]", "CPS")
-            if self.plateau_points:
-                pts = sorted(self.plateau_points, key=lambda p: p[0])
-                xs = [p[0] for p in pts]
-                ys = [p[3] for p in pts]
-                es = [p[4] for p in pts]
-                self.pl_ax.errorbar(xs, ys, yerr=es, fmt="o-", color=self.ui["accent"],
-                                    ecolor=self.ui["muted"], capsize=3, linewidth=1.5, markersize=5)
-                # nachylenie plateau [%/100V] z regresji liniowej
-                if len(xs) >= 2:
-                    slope = self._lin_slope(xs, ys)
-                    mean_cps = sum(ys) / len(ys)
-                    if mean_cps > 0:
-                        pct = slope / mean_cps * 100.0 * 100.0  # %/100V
-                        self.lbl_plateau_info.configure(
-                            text=f"Punktow: {len(xs)}   Nachylenie plateau ~ {pct:.1f} %/100V")
+            ax = self.pl_ax
+            ax.clear()
+            self._style_ax(ax, "Napiecie [V]", "CPS")
+            if pts:
+                ax.errorbar([p[0] for p in pts], [p[3] for p in pts], yerr=[p[4] for p in pts], fmt="o-",
+                            color=self.ui["accent"], ecolor=self.ui["muted"], capsize=3, linewidth=1.2,
+                            markersize=5, label="pomiar")
+                f = self._plateau_fit
+                if f is not None:
+                    ax.axvspan(f["od"], f["do"], color=self.ui["accent_tint"], zorder=0, label="plateau")
+                    ax.plot([f["od"], f["do"]], [f["a"] + f["b"] * f["od"], f["a"] + f["b"] * f["do"]], "-",
+                            color=self.ui["danger"], linewidth=1.5, label="dopasowanie")
+                    ax.axvline(f["work"], color=self.ui["muted"], linestyle="--", linewidth=1,
+                               label="napiecie pracy")
+                ax.legend(fontsize=8, loc="best")
             self.pl_fig.tight_layout()
             self.pl_canvas.draw_idle()
         except Exception:
@@ -1695,7 +1894,8 @@ class DAQCounterApp(tk.Tk):
         self.btn_hist_start = ttk.Button(btns, text="Start histogramu", style="Accent.TButton",
                                          command=self.start_histogram)
         self.btn_hist_start.pack(side="left")
-        ttk.Button(btns, text="Wyczysc", command=self.clear_histogram).pack(side="left", padx=(8, 0))
+        self.btn_hist_clear = ttk.Button(btns, text="Wyczysc", command=self.clear_histogram)
+        self.btn_hist_clear.pack(side="left", padx=(8, 0))
         ttk.Button(btns, text="Eksport CSV", command=self.export_hist_csv).pack(side="left", padx=(8, 0))
         ttk.Button(btns, text="Zapisz PNG",
                    command=lambda: self._save_figure_png(self.hist_fig, "histogram")).pack(side="left", padx=(8, 0))
@@ -1718,9 +1918,7 @@ class DAQCounterApp(tk.Tk):
         self.hist_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
     def start_histogram(self):
-        if self.running or self.series_active or self._closing:
-            return
-        if not self._normalize_inputs():
+        if not self._can_start():
             return
         k = int(self.hist_intervals.get())
         T = float(self.hist_interval_s.get())
@@ -1733,6 +1931,8 @@ class DAQCounterApp(tk.Tk):
         if self._hist_counts and not messagebox.askyesno(
                 "Histogram", "Nowy pomiar usunie obecny histogram. Kontynuowac?", parent=self):
             return
+        if not self._confirm_csv():
+            return
 
         self._hist_counts = []
         self._hist_T = T
@@ -1741,13 +1941,14 @@ class DAQCounterApp(tk.Tk):
         self._hist_last_n = 0
         self._hist_skipped = 0
         self._hist_discard_next = False
-        self.mode.set("time")
         self.hist_active = True
         self.stop_task()
         self._close_csv()
         self._redraw_hist()
-        if not self._start_run_internal(from_series=False, override_time_s=k * T):
+        if not self._open_csv_for("histogram", f"przedzialow={k}", f"dlugosc_przedzialu_s={_fmt_pl(T, 3)}") or \
+                not self._start_run_internal(from_series=False, override_time_s=k * T):
             self.hist_active = False
+            self._close_csv()
             return
         self._hist_schedule()
         self.status.set(f"Histogram: {k} przedzialow po {_fmt_pl(T, 2)} s "
@@ -1905,8 +2106,8 @@ class DAQCounterApp(tk.Tk):
                 for k in range(min(v), max(v) + 1):
                     w.writerow([k, v.count(k), _fmt_pl(len(v) * _poisson_pmf(k, mean), 3)])
             self.status.set(f"Zapisano histogram: {os.path.basename(path)}")
-        except Exception as e:
-            messagebox.showerror("Histogram", f"Nie udalo sie zapisac pliku.\n{e}")
+        except OSError as e:
+            messagebox.showerror("Histogram", self._file_error_msg(e, path))
 
     # ---------------------------------------------------------------
     # ZAKLADKA CZAS MARTWY (metoda dwoch zrodel)
@@ -1957,7 +2158,8 @@ class DAQCounterApp(tk.Tk):
         act.grid(row=6, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 8))
         self.btn_dt_use = ttk.Button(act, text="Uzyj tau w korekcie", command=self.use_deadtime)
         self.btn_dt_use.pack(side="left")
-        ttk.Button(act, text="Wyczysc", command=self.clear_deadtime).pack(side="left", padx=(8, 0))
+        self.btn_dt_clear = ttk.Button(act, text="Wyczysc", command=self.clear_deadtime)
+        self.btn_dt_clear.pack(side="left", padx=(8, 0))
 
         ttk.Label(parent, style="Muted.TLabel", justify="left", wraplength=600, text=(
             "Kolejnosc: zrodlo 1 -> oba zrodla -> zrodlo 2. Zrodla nie moga sie przesuwac miedzy pomiarami.\n"
@@ -1968,9 +2170,7 @@ class DAQCounterApp(tk.Tk):
         self._refresh_deadtime()
 
     def start_deadtime_step(self, key: str):
-        if self.running or self.series_active or self._closing:
-            return
-        if not self._normalize_inputs():
+        if not self._can_start():
             return
         tm = float(self.dt_meas_s.get())
         if tm <= 0:
@@ -1980,12 +2180,15 @@ class DAQCounterApp(tk.Tk):
         if not messagebox.askokcancel(f"Czas martwy - {title}", f"{hint}\n\nPomiar {_fmt_pl(tm, 0)} s. Start?",
                                       parent=self):
             return
-        self.mode.set("time")
+        if not self._confirm_csv():
+            return
         self._dt_active_key = key
         self.stop_task()
         self._close_csv()
-        if not self._start_run_internal(from_series=False, override_time_s=tm):
+        if not self._open_csv_for("czas martwy", f"krok={title}", f"czas_s={_fmt_pl(tm, 3)}") or \
+                not self._start_run_internal(from_series=False, override_time_s=tm):
             self._dt_active_key = None
+            self._close_csv()
             return
         self.status.set(f"Czas martwy: pomiar \"{title}\"...")
 
@@ -2060,23 +2263,30 @@ class DAQCounterApp(tk.Tk):
         box.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 8))
         box.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(box, text="Tlo [CPS]:").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=6)
+        ttk.Label(box, text="Liczba pomiarow:").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=4)
+        self.e_decay_runs = ttk.Entry(box, textvariable=self.decay_runs, width=10)
+        self.e_decay_runs.grid(row=0, column=1, sticky="w", pady=4)
+        ttk.Label(box, text="Czas pomiaru [s]:").grid(row=1, column=0, sticky="e", padx=(8, 4), pady=4)
+        self.e_decay_time = ttk.Entry(box, textvariable=self.decay_time_s, width=10)
+        self.e_decay_time.grid(row=1, column=1, sticky="w", pady=4)
+        ttk.Label(box, text="Przerwa [s]:").grid(row=2, column=0, sticky="e", padx=(8, 4), pady=4)
+        self.e_decay_pause = ttk.Entry(box, textvariable=self.decay_pause_s, width=10)
+        self.e_decay_pause.grid(row=2, column=1, sticky="w", pady=4)
+        ttk.Label(box, text="Tlo [CPS]:").grid(row=3, column=0, sticky="e", padx=(8, 4), pady=4)
         self.e_decay_bg = ttk.Entry(box, textvariable=self.decay_bg_cps, width=10)
-        self.e_decay_bg.grid(row=0, column=1, sticky="w", pady=6)
-
-        ttk.Label(box, text=("Uzywa parametrow z zakladki Seria:\n"
-                             "liczba runow, przerwa i czas pomiaru.\n"
-                             "Start przyciskiem START (rodzaj: Zanik)."),
-                  style="Muted.TLabel", justify="left").grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+        self.e_decay_bg.grid(row=3, column=1, sticky="w", pady=4)
 
         dec_export = ttk.Frame(box)
-        dec_export.grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
-        ttk.Button(dec_export, text="Eksport CSV", command=self.export_decay_csv).pack(side="left")
+        dec_export.grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 8))
+        self.btn_decay_start = ttk.Button(dec_export, text="Start zaniku", style="Accent.TButton",
+                                          command=self.start_decay)
+        self.btn_decay_start.pack(side="left")
+        ttk.Button(dec_export, text="Eksport CSV", command=self.export_decay_csv).pack(side="left", padx=(8, 0))
         ttk.Button(dec_export, text="Zapisz PNG",
                    command=lambda: self._save_figure_png(self.dec_fig, "zanik")).pack(side="left", padx=(8, 0))
 
-        self.lbl_decay_info = ttk.Label(parent, text="t1/2: -", style="Muted.TLabel",
+        self.lbl_decay_info = ttk.Label(parent, text="Tlo wpisuje sie samo po \"Zapamietaj jako tlo\". "
+                                        "Np. Ba-137m: 15 pomiarow po 20 s, bez przerwy.", style="Muted.TLabel",
                                         wraplength=600, justify="left")
         self.lbl_decay_info.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
 
@@ -2169,13 +2379,6 @@ class DAQCounterApp(tk.Tk):
         ax.yaxis.label.set_color(self.ui["text"])
         ax.grid(True, alpha=0.2)
 
-    def _lin_slope(self, xs, ys):
-        n = len(xs)
-        sx = sum(xs); sy = sum(ys)
-        sxx = sum(x * x for x in xs); sxy = sum(x * y for x, y in zip(xs, ys))
-        denom = n * sxx - sx * sx
-        return 0.0 if denom == 0 else (n * sxy - sx * sy) / denom
-
     def _on_sim_toggle(self):
         if self.use_simulator.get():
             self.status.set("Tryb symulatora aktywny.")
@@ -2188,6 +2391,17 @@ class DAQCounterApp(tk.Tk):
                                 "\"Odswiez\" w zakladce Urzadzenie.")
             else:
                 self.status.set("Tryb NI-DAQ aktywny.")
+        self._sync_sim_widgets()
+
+    def _sync_sim_widgets(self):
+        sim = bool(self.use_simulator.get())
+        if sim:
+            self.sim_banner.grid()
+        else:
+            self.sim_banner.grid_remove()
+        self.title("Geiger-Muller - NI USB-6210" + ("   [SYMULATOR]" if sim else ""))
+        if not self.running:
+            self.e_rate.configure(state="normal" if sim else "disabled")
 
     # ---------------------------------------------------------------
     # WYKRYWANIE KART NI
@@ -2252,8 +2466,8 @@ class DAQCounterApp(tk.Tk):
         try:
             fig.savefig(path, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
             self.status.set(f"Zapisano wykres: {os.path.basename(path)}")
-        except Exception as e:
-            messagebox.showerror("PNG", f"Nie udalo sie zapisac wykresu.\n{e}")
+        except OSError as e:
+            messagebox.showerror("PNG", self._file_error_msg(e, path))
 
     def _write_table_csv(self, path: str, comments, header, rows):
         with open(path, "w", newline="", encoding="utf-8") as f:
@@ -2273,22 +2487,21 @@ class DAQCounterApp(tk.Tk):
         if not path:
             return
 
-        pts = sorted(self.plateau_points, key=lambda p: p[0])
-        comments = ["kind=plateau", f"points={len(pts)}"]
-        if len(pts) >= 2:
-            xs = [p[0] for p in pts]
-            ys = [p[3] for p in pts]
-            mean_cps = sum(ys) / len(ys)
-            if mean_cps > 0:
-                pct = self._lin_slope(xs, ys) / mean_cps * 100.0 * 100.0
-                comments.append(f"slope_pct_per_100V={pct:.3f}")
-        rows = [[_fmt_pl(V, 1), n, _fmt_pl(t), _fmt_pl(cps), _fmt_pl(err)]
-                for (V, n, t, cps, err) in pts]
+        pts, rng, how, _err = self._plateau_analysis()
+        comments = ["kind=plateau", f"zrodlo={self._source_desc()}", f"punktow={len(pts)}"]
+        f = self._plateau_fit
+        if f is not None:
+            comments += [f"zakres_plateau ({f['how']}): od_V={_fmt_pl(f['od'], 1)}; do_V={_fmt_pl(f['do'], 1)}",
+                         f"nachylenie_pct_na_100V={_fmt_pl(f['pct'], 3)}; u_nachylenia={_fmt_pl(f['u_pct'], 3)}",
+                         f"napiecie_pracy_V={_fmt_pl(f['work'], 1)}"]
+        rows = [[_fmt_pl(V, 1), n, _fmt_pl(t), _fmt_pl(cps), _fmt_pl(err),
+                 1 if rng is not None and rng[0] <= i <= rng[1] else 0]
+                for i, (V, n, t, cps, err) in enumerate(pts)]
         try:
-            self._write_table_csv(path, comments, ["U_V", "N", "t_s", "CPS", "err_CPS"], rows)
+            self._write_table_csv(path, comments, ["U_V", "N", "t_s", "CPS", "u_CPS", "w_plateau"], rows)
             self.status.set(f"Zapisano plateau: {os.path.basename(path)}")
-        except Exception as e:
-            messagebox.showerror("Plateau", f"Nie udalo sie zapisac pliku.\n{e}")
+        except OSError as e:
+            messagebox.showerror("Plateau", self._file_error_msg(e, path))
 
     def export_decay_csv(self):
         if not self._decay_t:
@@ -2316,8 +2529,8 @@ class DAQCounterApp(tk.Tk):
             self._write_table_csv(path, comments,
                                   ["t_mid_s", "N", "t_pomiaru_s", "CPS", "err_CPS", "CPS_netto"], rows)
             self.status.set(f"Zapisano zanik: {os.path.basename(path)}")
-        except Exception as e:
-            messagebox.showerror("Zanik", f"Nie udalo sie zapisac pliku.\n{e}")
+        except OSError as e:
+            messagebox.showerror("Zanik", self._file_error_msg(e, path))
 
     # ---------------------------------------------------------------
     # CSV
@@ -2357,47 +2570,105 @@ class DAQCounterApp(tk.Tk):
             self._refresh_csv_toggle_button()
             self.status.set("CSV: wybrano plik, zapis wlaczony.")
 
-    def _open_csv_if_needed(self, header_info: str = ""):
+    CSV_HEADER = ["pomiar", "nr_w_serii", "t_s", "N", "sqrtN"]
+
+    @staticmethod
+    def _file_error_msg(e: Exception, path: str) -> str:
+        if isinstance(e, PermissionError):
+            return (f"Nie mozna zapisac pliku:\n{path}\n\n"
+                    "Czy jest otwarty w Excelu? Zamknij go w Excelu i sprobuj ponownie.")
+        return f"Nie mozna zapisac pliku:\n{path}\n\n{e}"
+
+    def _source_desc(self) -> str:
+        if self.use_simulator.get():
+            return f"SYMULATOR ({_fmt_pl(float(self.sim_rate_cps.get()), 1)} CPS) - dane losowane"
+        return f"{self.counter_channel.get()} {self.pfi_term.get()}"
+
+    def _next_measure_no(self, path: str) -> int:
+        """Kolejny numer pomiaru w pliku (numeracja ciagnie sie tez po ponownym uruchomieniu programu)."""
+        last = 0
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    first = line.split(";", 1)[0]
+                    if first.isdigit():
+                        last = max(last, int(first))
+        except OSError:
+            pass
+        return last + 1
+
+    def _open_csv_for(self, kind: str, *info) -> bool:
+        """Otwiera CSV dla nowego pomiaru (jesli zapis wlaczony). False = nie startowac."""
         if not self.log_to_csv.get():
-            return
-
-        if self.csv_file is not None and self.csv_writer is not None:
-            return
-
+            return True
         path = self.csv_path.get().strip()
         if not path:
-            raise ValueError("Nie wybrano pliku CSV.")
-
-        file_exists = os.path.exists(path)
-        file_empty = (not file_exists) or (os.path.getsize(path) == 0)
-
-        # zawsze dopisuj - np. pomiar zrodla nie moze skasowac wczesniejszego pomiaru tla
-        self.csv_file = open(path, "a", newline="", encoding="utf-8", buffering=1)
+            messagebox.showerror("CSV", "Nie wybrano pliku CSV (zakladka Zapis).")
+            return False
+        try:
+            file_empty = (not os.path.exists(path)) or os.path.getsize(path) == 0
+            has_header = False
+            if not file_empty:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    has_header = any(line.strip() == ";".join(self.CSV_HEADER) for line in f)
+            self._csv_measure_no = 1 if file_empty else self._next_measure_no(path)
+            # zawsze dopisuj - np. pomiar zrodla nie moze skasowac wczesniejszego pomiaru tla
+            self.csv_file = open(path, "a", newline="", encoding="utf-8", buffering=1)
+        except OSError as e:
+            self.csv_file = None
+            messagebox.showerror("CSV", self._file_error_msg(e, path))
+            return False
 
         created = datetime.now().isoformat(timespec="seconds")
         if file_empty:
             self.csv_file.write("sep=;\n")
-            self.csv_file.write(f"# created={created}\n")
-        else:
-            self.csv_file.write(f"# --- nowy pomiar {created}\n")
-        if header_info:
-            for line in header_info.splitlines():
-                self.csv_file.write(f"# {line}\n")
+        self.csv_file.write(f"# --- pomiar {self._csv_measure_no}: {kind}, {created}\n")
+        self.csv_file.write(f"# zrodlo={self._source_desc()}\n")
+        for line in info:
+            self.csv_file.write(f"# {line}\n")
+        tau = float(self.dead_time_us.get())
+        if tau > 0:
+            self.csv_file.write(f"# tau_us={_fmt_pl(tau, 1)}\n")
         if self._bg is not None:
-            self.csv_file.write(f"# bg_cps={self._bg[0]:.6g}\n# bg_u_cps={self._bg[1]:.6g}\n")
-
+            self.csv_file.write(f"# tlo_CPS={_fmt_pl(self._bg[0], 5)}; u_tlo_CPS={_fmt_pl(self._bg[1], 5)}\n")
         self.csv_writer = csv.writer(self.csv_file, delimiter=";", lineterminator="\n")
-
-        if file_empty:
-            self.csv_writer.writerow(["run", "t_s", "N", "sqrtN"])
-
+        if not has_header:
+            self.csv_writer.writerow(self.CSV_HEADER)
         self.csv_file.flush()
-        try:
-            os.fsync(self.csv_file.fileno())
-        except Exception:
-            pass
-
+        self._csv_failed = False
         self._last_log_t = 0.0
+        return True
+
+    def _csv_write(self, write):
+        """Zapis do otwartego CSV; blad (np. wyjety pendrive) nie moze przerwac pomiaru."""
+        if not self.csv_writer or not self.csv_file:
+            return
+        try:
+            write()
+            self.csv_file.flush()
+        except OSError as e:
+            path = self.csv_path.get()
+            self._close_csv()
+            if not self._csv_failed:
+                self._csv_failed = True
+                self.status.set("Zapis CSV przerwany - pomiar trwa dalej, ale nie jest zapisywany.")
+                messagebox.showwarning("CSV", self._file_error_msg(e, path) +
+                                       "\n\nPomiar trwa dalej, ale nie jest zapisywany do pliku.")
+
+    def _csv_comment(self, text: str):
+        self._csv_write(lambda: self.csv_file.write(f"# {text}\n"))
+
+    def _csv_result_comment(self, what: str):
+        """Linia z wynikiem pomiaru - zeby w pliku nie szukac ostatniego wiersza z tysiecy."""
+        n, t = int(self._last_counts), float(self._last_t)
+        if t <= 0:
+            return
+        cps, u = n / t, math.sqrt(max(n, 0)) / t
+        line = (f"wynik ({what}): N={n}; t_s={_fmt_pl(t, 3)}; CPS={_fmt_pl(cps, 4)}; u_CPS={_fmt_pl(u, 4)}")
+        net = self._net_cps(cps, u)
+        if net is not None:
+            line += f"; CPS_netto={_fmt_pl(net[0], 4)}; u_CPS_netto={_fmt_pl(net[1], 4)}"
+        self._csv_comment(line)
 
     def _close_csv(self):
         try:
@@ -2414,21 +2685,9 @@ class DAQCounterApp(tk.Tk):
         self.csv_writer = None
 
     def _log_row(self, run_index: int, t: float, counts: int):
-        if not self.csv_writer or not self.csv_file:
-            return
-
         sqrt_n = math.sqrt(max(int(counts), 0))
-
-        def fmt(x):
-            return f"{x:.3f}".replace(".", ",")  # przecinek dziesietny (Excel PL)
-
-        self.csv_writer.writerow([int(run_index), fmt(float(t)), int(counts), fmt(sqrt_n)])
-
-        self.csv_file.flush()
-        try:
-            os.fsync(self.csv_file.fileno())
-        except Exception:
-            pass
+        self._csv_write(lambda: self.csv_writer.writerow(
+            [self._csv_measure_no, int(run_index), _fmt_pl(float(t), 3), int(counts), _fmt_pl(sqrt_n, 3)]))
 
     # ---------------------------------------------------------------
     # BLOKOWANIE KONTROLEK
@@ -2447,6 +2706,9 @@ class DAQCounterApp(tk.Tk):
         self.btn_start.configure(state="disabled" if locked else "normal")
         self.btn_stop.configure(state="normal" if locked else "disabled")
         self.btn_reset.configure(state="disabled" if locked else "normal")
+        if not locked:
+            self._sync_sim_widgets()
+            self._sync_start_label()
 
     # ---------------------------------------------------------------
     # SYMULATOR (rozklad Poissona)
@@ -2497,21 +2759,32 @@ class DAQCounterApp(tk.Tk):
         self.lbl_series_progress.configure(text="Seria: -")
         self.status.set("Wyczyszczono wyniki serii.")
 
-    def start_series(self, decay=False):
-        if self.running or self.series_active or self.plateau_active or self._closing:
+    def start_series(self):
+        if not self._can_start():
             return
-
-        try:
-            runs = int(self.series_runs.get())
-            pause = float(self.series_pause_s.get())
-            if runs < 1:
-                raise ValueError("Liczba runow musi byc >= 1.")
-            if pause < 0:
-                raise ValueError("Przerwa musi byc >= 0.")
-        except Exception as e:
-            messagebox.showerror("Seria", str(e))
+        runs = int(self.series_runs.get())
+        pause = float(self.series_pause_s.get())
+        if runs < 1 or pause < 0:
+            messagebox.showerror("Seria", "Liczba pomiarow musi byc >= 1, a przerwa >= 0.")
             return
+        if self._confirm_csv():
+            self._begin_series(runs, pause, time_s=None, decay=False)
 
+    def start_decay(self):
+        if not self._can_start():
+            return
+        runs = int(self.decay_runs.get())
+        tm = float(self.decay_time_s.get())
+        pause = float(self.decay_pause_s.get())
+        if runs < 3 or tm <= 0 or pause < 0:
+            messagebox.showerror("Zanik", "Potrzeba co najmniej 3 pomiarow, czas pomiaru > 0 i przerwa >= 0.")
+            return
+        if self._confirm_csv():
+            self._begin_series(runs, pause, time_s=tm, decay=True)
+
+    def _begin_series(self, runs: int, pause: float, time_s, decay: bool):
+        """time_s=None: kazdy pomiar wg zakladki Pomiar (czas albo N); liczba: staly czas."""
+        self._series_cfg = {"runs": runs, "pause": pause, "time_s": time_s}
         self._is_decay = decay
         if decay:
             self._series_start_perf = time.perf_counter()
@@ -2520,44 +2793,32 @@ class DAQCounterApp(tk.Tk):
             self._decay_n = []
             self._decay_dt = []
             self._decay_fit = None
+            self.lbl_decay_info.configure(text=f"Zanik: {runs} pomiarow po {_fmt_pl(time_s, 1)} s...")
 
         self.clear_series_results()
         self.stop_task()
         self._close_csv()
-
         self.series_active = True
         self.series_index = 0
 
-        try:
-            info = (
-                "kind=series\n"
-                f"runs={runs}\n"
-                f"pause_s={pause}\n"
-                f"mode={self.mode.get()}\n"
-                f"device={'SIM' if self.use_simulator.get() else self.counter_channel.get()}"
-            )
-            if self.mode.get() == "time":
-                info += f"\nset_time={float(self.time_value.get())} {self.time_unit.get()}"
-            else:
-                info += f"\nset_counts={int(self.target_counts.get())}"
-            info += f"\ntau_us={float(self.dead_time_us.get())}"
-
-            self._open_csv_if_needed(header_info=info)
-        except Exception as e:
+        if time_s is not None:
+            set_info = f"czas_pomiaru_s={_fmt_pl(time_s, 3)}"
+        else:
+            set_info = self._set_info()
+        if not self._open_csv_for(("zanik" if decay else "seria"), f"liczba_pomiarow={runs}",
+                                  f"przerwa_s={_fmt_pl(pause, 3)}", set_info):
             self.series_active = False
-            messagebox.showerror("CSV", str(e))
-            self._close_csv()
             return
 
-        self.series_end_time_text.set("Koniec serii: -")  # wlasciwa wartosc ustawi pierwszy run
-        self.status.set("Seria: start.")
+        self.series_end_time_text.set("Koniec serii: -")  # wlasciwa wartosc ustawi pierwszy pomiar
+        self.status.set("Zanik: start." if decay else "Seria: start.")
         self._start_next_series_run()
 
     def _start_next_series_run(self):
         if not self.series_active or self._closing:
             return
 
-        runs = int(self.series_runs.get())
+        runs = self._series_cfg["runs"]
         if self.series_index >= runs:
             self._finish_series()
             return
@@ -2565,7 +2826,7 @@ class DAQCounterApp(tk.Tk):
         self.series_index += 1
         self.lbl_series_progress.configure(text=f"Seria: {self.series_index}/{runs}")
 
-        ok = self._start_run_internal(from_series=True)
+        ok = self._start_run_internal(from_series=True, override_time_s=self._series_cfg["time_s"])
         if not ok:
             self.series_active = False
             self._set_controls_locked(False)
@@ -2578,6 +2839,10 @@ class DAQCounterApp(tk.Tk):
 
         if self._is_decay:
             self._fit_and_plot_decay()
+            if self._decay_fit is not None:
+                lam, u_lam, t_half, u_half = self._decay_fit
+                self._csv_comment(f"wynik zaniku: t_half_s={_fmt_pl(t_half, 4)}; u_t_half_s={_fmt_pl(u_half, 4)}; "
+                                  f"lambda_1_s={lam:.6g}; u_lambda_1_s={u_lam:.6g}".replace(".", ","))
         elif self.series_results:
             done = [r for r in self.series_results if r["t"] > 0]
             cps_list = [r["cps"] for r in done]
@@ -2591,8 +2856,10 @@ class DAQCounterApp(tk.Tk):
                                 f"(z rozkladu Poissona oczekiwane ~{_fmt_pl(poisson_std)})")
                 n_sum = sum(r["n"] for r in done)
                 t_sum = sum(r["t"] for r in done)
-                self._last_summary = (n_sum, t_sum, f"seria {len(done)} runow (suma)")
-                self._refresh_result_lines(n_sum, t_sum, prefix=f"Suma serii ({len(done)} runow): ")
+                self._last_summary = (n_sum, t_sum, f"seria {len(done)} pomiarow (suma)")
+                self._refresh_result_lines(n_sum, t_sum, prefix=f"Suma serii ({len(done)} pomiarow): ")
+                self._csv_comment(f"wynik serii (suma): N={n_sum}; t_s={_fmt_pl(t_sum)}; "
+                                  f"sredni_CPS={_fmt_pl(mean)}; odch_std_CPS={_fmt_pl(std)}")
             else:
                 self.status.set("Seria zakonczona.")
         else:
@@ -2607,22 +2874,21 @@ class DAQCounterApp(tk.Tk):
     # ---------------------------------------------------------------
     # START / STOP / FINALIZE
     # ---------------------------------------------------------------
-    def start_measurement(self):
-        if self.running or self.series_active or self.plateau_active or self._closing:
-            return
+    def _set_info(self) -> str:
+        if self.mode.get() == "time":
+            return f"czas_pomiaru_s={_fmt_pl(self._run_duration_seconds(), 3)}"
+        return f"do_N={int(self.target_counts.get())}"
 
+    def start_measurement(self):
+        if not self._can_start() or not self._confirm_csv():
+            return
         self.series_active = False
         self.series_index = 0
         self._is_decay = False
 
         self.stop_task()
         self._close_csv()
-        try:
-            self._open_csv_if_needed(
-                header_info=f"kind=single\ntau_us={float(self.dead_time_us.get())}")
-        except Exception as e:
-            messagebox.showerror("CSV", str(e))
-            self._close_csv()
+        if not self._open_csv_for("pomiar", self._set_info()):
             return
 
         ok = self._start_run_internal(from_series=False)
@@ -2630,10 +2896,12 @@ class DAQCounterApp(tk.Tk):
             self._close_csv()
 
     def _start_run_internal(self, from_series: bool, override_time_s=None) -> bool:
+        """override_time_s: pomiar na staly czas niezaleznie od zakladki Pomiar
+        (plateau, histogram, czas martwy, zanik)."""
         self._cancel_update_timer()
         self._cancel_series_timer()
 
-        # reset wykresu na kazdy run
+        # reset wykresu na kazdy pomiar
         self._t_points = []
         self._n_points = []
         self._last_plot_t = 0.0
@@ -2645,15 +2913,16 @@ class DAQCounterApp(tk.Tk):
         except Exception:
             pass
 
+        self._run_mode = "time" if override_time_s is not None else self.mode.get()
+
         # walidacja
         try:
-            if self.mode.get() == "time":
-                if not (float(self.time_value.get()) > 0):
-                    raise ValueError("Czas musi byc > 0.")
-            else:
-                if int(self.target_counts.get()) < 1:
-                    raise ValueError("N musi byc >= 1.")
-
+            if self._run_mode == "time":
+                tgt = override_time_s if override_time_s is not None else self._run_duration_seconds()
+                if not (tgt > 0):
+                    raise ValueError("Czas pomiaru musi byc > 0.")
+            elif int(self.target_counts.get()) < 1:
+                raise ValueError("N musi byc >= 1.")
             if self.use_simulator.get() and float(self.sim_rate_cps.get()) < 0:
                 raise ValueError("CPS w symulatorze musi byc >= 0.")
         except Exception as e:
@@ -2662,26 +2931,21 @@ class DAQCounterApp(tk.Tk):
 
         # reset wynikow
         self.current_counts.set(0)
-        self.elapsed_time.set(0.0)
-        self.sqrt_counts.set(0.0)
-        self.cps_value.set("0.000")
+        self.elapsed_time.set("0,0")
+        self.sqrt_counts.set("0")
+        self.cps_value.set("0,00")
         self.cps_corr_value.set("-")
         self._rate_scale = 10.0
         self._reset_progress()
         self._last_counts = 0
         self._last_t = 0.0
 
-        # czas docelowy (Plateau podaje override_time_s)
-        if self.mode.get() == "time":
-            self.target_time_s = override_time_s if override_time_s is not None else self._run_duration_seconds()
-        else:
-            self.target_time_s = None
+        self.target_time_s = tgt if self._run_mode == "time" else None
         self._update_expected_end_times(from_series=from_series)
 
         # start zrodla zliczen
         if self.use_simulator.get():
             self._sim_counts = 0
-            self._sim_last_t = None
         else:
             if not NIDAQ_AVAILABLE:
                 messagebox.showerror("NI-DAQ", "Brak nidaqmx w tym Pythonie. Wlacz tryb symulatora.")
@@ -2698,7 +2962,9 @@ class DAQCounterApp(tk.Tk):
                 ch.ci_count_edges_term = f"/{dev}/{pfi}"
                 self.task.start()
             except Exception as e:
-                messagebox.showerror("Blad DAQ", str(e))
+                messagebox.showerror("Blad DAQ", f"{e}\n\nCzy karta nie jest zajeta przez inny program "
+                                                 "(np. Test Panel w NI MAX)? Czy nazwa licznika i wejscia PFI "
+                                                 "w zakladce Urzadzenie jest poprawna?")
                 self.stop_task()
                 self.status.set("Blad startu DAQ.")
                 return False
@@ -2711,7 +2977,8 @@ class DAQCounterApp(tk.Tk):
         self._start_click_pump()
 
         if from_series:
-            self.status.set(f"Seria: run {self.series_index} trwa...")
+            what = "Zanik" if self._is_decay else "Seria"
+            self.status.set(f"{what}: pomiar {self.series_index}/{self._series_cfg['runs']} trwa...")
         else:
             self.status.set("Pomiar trwa...")
 
@@ -2719,46 +2986,48 @@ class DAQCounterApp(tk.Tk):
         return True
 
     def stop_measurement(self):
-        if not self.running and not self.series_active:
-            return
-
-        # STOP w serii przerywa cala serie
-        if self.series_active:
-            self.series_active = False
+        if self.running:
+            self.end_time_text.set("Koniec: -")
+            self.series_end_time_text.set("Koniec serii: -")
+            self.running = False
+            self._finalize_measurement("Zatrzymano pomiar.", ended_normally=False)
+        elif self.series_active:
+            # STOP w przerwie miedzy pomiarami serii: nic nie jest mierzone, wiec nic nie zapisujemy
             self._cancel_series_timer()
-
-        self.end_time_text.set("Koniec: -")
-        self.series_end_time_text.set("Koniec serii: -")
-        self.running = False
-        self._finalize_measurement("Zatrzymano pomiar.", ended_normally=False)
+            self.series_active = False
+            self._fit_decay_if_stopped()
+            self.end_time_text.set("Koniec: -")
+            self.series_end_time_text.set("Koniec serii: -")
+            self._set_controls_locked(False)
+            self._close_csv()
+            self.status.set(f"Seria przerwana po {self.series_index} pomiarach.")
 
     def _finalize_measurement(self, msg: str, ended_normally: bool):
         self._cancel_update_timer()
         self._stop_click_pump()
         self.stop_task()
-
-        if not self.series_active:
-            self._set_controls_locked(False)
-
         self.status.set(msg)
+        in_series = self.series_active
 
-        if (not self.series_active) and ended_normally:
-            self._beep()
-
-        # w serii: zapisz wynik runa i zaplanuj kolejny po przerwie
-        if self.series_active and ended_normally:
+        # w serii: zapisz wynik pomiaru i zaplanuj kolejny po przerwie
+        if in_series and ended_normally:
             self._store_series_result()
-            if self.csv_writer:
-                self._log_row(self.series_index, self._last_t, self._last_counts)
-            pause = float(self.series_pause_s.get())
+            self._log_row(self.series_index, self._last_t, self._last_counts)
+            self._csv_result_comment(f"pomiar {self.series_index}/{self._series_cfg['runs']}")
+            pause = self._series_cfg["pause"]
             self._after_series_id = self.after(int(pause * 1000), self._start_next_series_run)
             return
 
-        # plateau: zapisz punkt (CPS vs napiecie)
+        if in_series:   # STOP albo blad w trakcie pomiaru serii
+            self.series_active = False
+            self._fit_decay_if_stopped()
+            self.series_end_time_text.set("Koniec serii: -")
+
+        what = None
         if self.plateau_active:
             if ended_normally:
                 self._store_plateau_point()
-                self.status.set(f"Plateau: zapisano punkt {self._plateau_voltage_pending:.0f} V.")
+                what = f"plateau U={_fmt_pl(self._plateau_voltage_pending, 1)} V"
             self.plateau_active = False
 
         if self.hist_active:
@@ -2767,6 +3036,13 @@ class DAQCounterApp(tk.Tk):
             n_int = len(self._hist_counts)
             self.status.set(f"Histogram: {n_int} przedzialow" +
                             ("." if ended_normally else " (pomiar przerwany - analiza z tego, co jest)."))
+            st = self._hist_summary()
+            if st is not None:
+                chi = st["chi"]
+                self._csv_comment(f"wynik histogramu: przedzialow={st['m']}; dlugosc_s={_fmt_pl(self._hist_T, 3)}; "
+                                  f"srednia={_fmt_pl(st['mean'], 4)}; odch_std={_fmt_pl(st['s'], 4)}"
+                                  + (f"; chi2={_fmt_pl(chi[0], 3)}; st_swobody={chi[1]}; p={_fmt_pl(chi[2], 3)}"
+                                     if chi else ""))
 
         if self._dt_active_key is not None:
             key = self._dt_active_key
@@ -2774,31 +3050,37 @@ class DAQCounterApp(tk.Tk):
             if ended_normally and self._last_t > 0:
                 self._dt_data[key] = (self._last_counts, self._last_t)
                 self._refresh_deadtime()
+                what = "czas martwy: " + next(t for k, t, _h in self.DT_STEPS if k == key)
                 left = [t for k, t, _h in self.DT_STEPS if k not in self._dt_data]
                 self.status.set("Czas martwy: zapisano pomiar." +
                                 (f" Nastepny: {left[0]}." if left else " Wynik tau w zakladce Czas martwy."))
 
         if self._last_t > 0:
-            desc = "pomiar zatrzymany recznie" if not ended_normally else "ostatni pomiar"
+            desc = "pomiar zatrzymany recznie" if not ended_normally else (what or "ostatni pomiar")
             self._last_summary = (self._last_counts, self._last_t, desc)
+            self._log_row(self.series_index if in_series else 0, self._last_t, self._last_counts)
+            self._csv_result_comment(what or ("pomiar przerwany" if not ended_normally else "pomiar"))
 
-        # pojedynczy pomiar: zapisz wiersz koncowy
-        if self.csv_writer and self._last_t > 0:
-            run_idx = self.series_index if self.series_active else 0
-            self._log_row(run_idx, self._last_t, self._last_counts)
+        self._set_controls_locked(False)
+        self._close_csv()
+        if ended_normally:
+            self._beep()
 
-        if not self.series_active:
-            self._close_csv()
+    def _fit_decay_if_stopped(self):
+        """Zanik przerwany STOP-em (np. zliczenia spadly juz do tla): dopasuj z tego, co zmierzono."""
+        if self._is_decay and len(self._decay_t) >= 3:
+            self._fit_and_plot_decay()
+        self._is_decay = False
 
     def _store_series_result(self):
         run = self.series_index
         t = float(self._last_t)
         n = int(self._last_counts)
         cps = (n / t) if t > 0 else 0.0
-        mode = self.mode.get()
+        mode = "czas" if self._run_mode == "time" else "do N"
 
         self.series_results.append({"run": run, "mode": mode, "t": t, "n": n, "cps": cps})
-        self.series_table.insert("", "end", values=(run, mode, f"{t:.3f}", n, f"{cps:.3f}"))
+        self.series_table.insert("", "end", values=(run, mode, _fmt_pl(t, 2), n, _fmt_pl(cps, 2)))
 
         if self._is_decay and self._series_start_perf is not None:
             midpoint = (time.perf_counter() - self._series_start_perf) - t / 2.0
@@ -2806,6 +3088,8 @@ class DAQCounterApp(tk.Tk):
             self._decay_cps.append(cps)
             self._decay_n.append(n)
             self._decay_dt.append(t)
+            self.lbl_decay_info.configure(
+                text=f"Zanik: zmierzono {len(self._decay_t)}/{self._series_cfg['runs']} pomiarow...")
 
     # ---------------------------------------------------------------
     # UPDATE (petla odpytujaca)
@@ -2827,17 +3111,17 @@ class DAQCounterApp(tk.Tk):
             frac = 0.0 if self._rate_scale <= 0 else min(1.0, cps / self._rate_scale)
             c.delete("bar")
             c.create_rectangle(0, 0, int(w * frac), h, fill=self.ui["accent"], width=0, tags="bar")
-            c.create_text(w - 5, h // 2, text=f"{cps:.1f} cps", anchor="e",
+            c.create_text(w - 5, h // 2, text=f"{_fmt_pl(cps, 1)} CPS", anchor="e",
                           fill=self.ui["text"], tags="bar")
         except Exception:
             pass
 
     def _update_progress(self, t: float, counts: int):
-        if self.mode.get() == "time" and self.target_time_s:
+        if self._run_mode == "time" and self.target_time_s:
             frac = max(0.0, min(1.0, t / self.target_time_s))
             self.progress_value.set(frac * 100.0)
-            self.remaining_text.set(f"Pozostalo: {max(0.0, self.target_time_s - t):.1f} s")
-        elif self.mode.get() == "counts":
+            self.remaining_text.set(f"Pozostalo: {_fmt_pl(max(0.0, self.target_time_s - t), 1)} s")
+        elif self._run_mode == "counts":
             tgt = max(1, int(self.target_counts.get()))
             self.progress_value.set(max(0.0, min(1.0, counts / tgt)) * 100.0)
             self.remaining_text.set(f"N: {counts} / {tgt}")
@@ -2888,18 +3172,18 @@ class DAQCounterApp(tk.Tk):
                 self._plot_point(t, counts)
 
         self.current_counts.set(counts)
-        self.elapsed_time.set(round(t, 3))
-        self.sqrt_counts.set(round(sqrt_n, 3))
-        self.cps_value.set(f"{cps:.3f}")
+        self.elapsed_time.set(_fmt_pl(t, 1))
+        self.sqrt_counts.set(_fmt_pl(sqrt_n, 1))
+        self.cps_value.set(_fmt_pl(cps, 2))
 
         # korekta czasu martwego (dead time)
         tau = float(self.dead_time_us.get()) * 1e-6
         if tau > 0 and (1.0 - cps * tau) > 0:
-            self.cps_corr_value.set(f"{cps / (1.0 - cps * tau):.3f}")
+            self.cps_corr_value.set(_fmt_pl(cps / (1.0 - cps * tau), 2))
         elif tau > 0:
             self.cps_corr_value.set("przeciazenie")
         else:
-            self.cps_corr_value.set("-")
+            self.cps_corr_value.set("- (tau = 0)")
 
         self._update_rate_bar(cps)
         self._update_progress(t, counts)
@@ -2911,14 +3195,14 @@ class DAQCounterApp(tk.Tk):
                 self._log_row(run_idx, t, counts)
                 self._last_log_t = t
 
-        # warunki zakonczenia runa (histogram konczy _hist_boundary po ostatnim przedziale)
-        if (self.mode.get() == "time" and self.target_time_s and t >= self.target_time_s
+        # warunki zakonczenia pomiaru (histogram konczy _hist_boundary po ostatnim przedziale)
+        if (self._run_mode == "time" and self.target_time_s and t >= self.target_time_s
                 and not self.hist_active):
             self.running = False
             self._finalize_measurement("Zakonczono (uplynal czas).", ended_normally=True)
             return
 
-        if self.mode.get() == "counts" and counts >= self.target_counts.get() and not self.hist_active:
+        if self._run_mode == "counts" and counts >= self.target_counts.get():
             self.running = False
             self._finalize_measurement("Zakonczono (osiagnieto N).", ended_normally=True)
             return
@@ -2938,11 +3222,9 @@ class DAQCounterApp(tk.Tk):
         self._last_plot_t = t
 
     def _on_read_error(self, e: Exception):
-        messagebox.showerror("Blad", f"Blad odczytu:\n{e}")
         self.running = False
-        if self.series_active:
-            self.series_active = False
-        self._finalize_measurement("Blad odczytu.", ended_normally=False)
+        self._finalize_measurement("Blad odczytu - pomiar przerwany.", ended_normally=False)
+        messagebox.showerror("Blad", f"Blad odczytu:\n{e}\n\nCzy karta jest podlaczona (USB)?")
 
     # ---------------------------------------------------------------
     # RESET / TASK / CLOSE
@@ -2954,14 +3236,15 @@ class DAQCounterApp(tk.Tk):
         self._is_decay = False
         self.hist_active = False
         self._dt_active_key = None
+        self._run_mode = self.mode.get()
 
         self._cancel_all_timers()
         self._stop_click_pump()
 
         self.current_counts.set(0)
-        self.elapsed_time.set(0.0)
-        self.sqrt_counts.set(0.0)
-        self.cps_value.set("0.000")
+        self.elapsed_time.set("0,0")
+        self.sqrt_counts.set("0")
+        self.cps_value.set("0,00")
         self.cps_corr_value.set("-")
         self._reset_progress()
         self._last_summary = None
