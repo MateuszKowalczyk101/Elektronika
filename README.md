@@ -56,6 +56,24 @@ Bez karty działa w **trybie symulatora**, więc obsługę można przećwiczyć 
 > a paczkę `nidaqmx` (to, co jest w `import nidaqmx`) poleceniem `pip`. Do pracy z kartą
 > potrzebne są **obie**.
 
+## Najprościej: gotowy GeigerApp.exe
+
+Gotowy program (jeden plik, nie trzeba instalować Pythona ani Anacondy):
+**<https://github.com/MateuszKowalczyk101/Elektronika/releases/latest/download/GeigerApp.exe>**
+
+1. Pobierz plik (może być na dowolnym komputerze, także na Macu) i skopiuj na komputer
+   z Windowsem 10/11 (64-bit), np. do `C:\GeigerApp`.
+2. Ikonka: prawy klik na `GeigerApp.exe` → *Pokaż więcej opcji* → *Wyślij do → Pulpit (utwórz skrót)*.
+3. Przy pierwszym uruchomieniu Windows może pokazać „System Windows ochronił ten komputer”:
+   *Więcej informacji → Uruchom mimo to* (program nie ma podpisu cyfrowego).
+
+Do pracy z kartą komputer musi mieć **sterownik NI-DAQmx** (krok 1 poniżej). Bez niego program
+działa w trybie symulatora. Plik `.exe` buduje się automatycznie na GitHubie po każdej zmianie
+w gałęzi `main` (zakładka *Actions*, wszystkie wersje w zakładce *Releases*).
+
+Plik `.exe` działa na każdym koncie Windows. Gdy z komputera korzysta kilka osób, wrzuć go
+do folderu poza `C:\Users\...` (np. `C:\GeigerApp`), a każdy zrobi sobie skrót na pulpicie.
+
 ## Instalacja krok po kroku (Windows)
 
 ### 1. Sterownik NI-DAQmx
@@ -221,6 +239,7 @@ geiger_gui.py            program
 requirements.txt         paczki potrzebne do uruchomienia
 requirements-dev.txt     + pytest i PyInstaller (testy, budowanie .exe)
 build_exe.bat            budowanie dist\GeigerApp.exe
+.github/workflows/       automatyczne testy i budowanie .exe na GitHubie (wydania w Releases)
 assets/                  ikona programu (.ico dla pliku .exe, .png dla okna)
 docs/                    zrzuty ekranu do tego pliku
 tests/                   testy (pytest) i atrapa paczki nidaqmx

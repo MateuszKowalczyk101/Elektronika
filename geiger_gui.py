@@ -3305,4 +3305,12 @@ class DAQCounterApp(tk.Tk):
 
 if __name__ == "__main__":
     app = DAQCounterApp()
+    # Test startu .exe na GitHubie: okno sie otwiera, zapisuje wynik do pliku i samo zamyka.
+    smoke_file = os.environ.get("GEIGERAPP_SMOKE_TEST")
+    if smoke_file:
+        def _smoke_done():
+            with open(smoke_file, "w", encoding="utf-8") as f:
+                f.write(f"ok nidaqmx={int(NIDAQ_AVAILABLE)}\n")
+            app.on_close()
+        app.after(3000, _smoke_done)
     app.mainloop()
