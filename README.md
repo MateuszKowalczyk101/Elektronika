@@ -14,18 +14,25 @@ Bez karty działa w **trybie symulatora**, więc obsługę można przećwiczyć 
 - **Pomiar** w zadanym czasie albo do zadanej liczby impulsów. Wynik od razu z niepewnością,
   np. `N = 324 ± 18`, `CPS = 53,7 ± 3,0`, i przycisk „Kopiuj wynik” do sprawozdania.
 - **Tło i wynik netto**: po pomiarze tła kliknij „Zapamiętaj jako tło”. Od tej chwili każdy
-  wynik ma też CPS netto (po odjęciu tła) z niepewnością.
+  wynik ma też CPS netto (po odjęciu tła) z niepewnością. Gdy ustawiony jest czas martwy τ,
+  wynik i netto są podawane także po korekcie.
 - **Seria** pomiarów z przerwami i tabelą wyników.
 - **Statystyka**: histogram zliczeń z krzywymi Poissona i Gaussa oraz test χ² zgodności
   z rozkładem Poissona.
-- **Plateau** licznika: CPS w funkcji napięcia i nachylenie plateau w %/100 V.
-- **Zanik**: dopasowanie ważone niepewnościami, t½ i λ z niepewnością.
+- **Plateau** licznika: CPS w funkcji napięcia. Program sam znajduje płaski odcinek (pomija próg
+  i wyładowanie), podaje nachylenie z niepewnością w %/100 V i proponowane napięcie pracy.
+  Po każdym punkcie pole napięcia przesuwa się o zadany krok.
+- **Zanik**: własne parametry (liczba pomiarów, czas, przerwa), dopasowanie ważone
+  niepewnościami, t½ i λ z niepewnością. Po przerwaniu STOP-em liczy z zebranych punktów.
 - **Czas martwy** metodą dwóch źródeł, z niepewnością. Jednym kliknięciem trafia do korekty
   „CPS popr.”.
-- Zapis do **CSV** (kolejne pomiary są dopisywane, nic się nie nadpisuje), eksport tabel
-  i wykresów do **CSV/PNG**.
-- Wykrywanie kart NI, podpowiedzi po najechaniu myszą, instrukcja ćwiczeń pod **F1**,
-  skrót **SPACJA** = START/STOP.
+- Zapis do **CSV**: każdy pomiar (także plateau, histogram i czas martwy) jest dopisywany
+  z kolejnym numerem i linią z wynikiem. Nic się nie nadpisuje. Eksport tabel i wykresów
+  do **CSV/PNG**.
+- Przycisk **START** (i **SPACJA**) robi to, co jest w otwartej zakładce, a napis na nim
+  to pokazuje, np. „START (seria)”. **STOP** przerywa wszystko.
+- Wyraźny żółty pasek, gdy działa **symulator** (żeby nie pomylić losowych danych z pomiarem).
+- Wykrywanie kart NI, podpowiedzi po najechaniu myszą, instrukcja ćwiczeń pod **F1**.
 
 ![Histogram](docs/histogram.png)
 
@@ -48,6 +55,24 @@ Bez karty działa w **trybie symulatora**, więc obsługę można przećwiczyć 
 > **NI MAX / NI-DAQmx to nie jest paczka Pythona.** Sterownik instaluje się instalatorem NI,
 > a paczkę `nidaqmx` (to, co jest w `import nidaqmx`) poleceniem `pip`. Do pracy z kartą
 > potrzebne są **obie**.
+
+## Najprościej: gotowy GeigerApp.exe
+
+Gotowy program (jeden plik, nie trzeba instalować Pythona ani Anacondy):
+**<https://github.com/MateuszKowalczyk101/Elektronika/releases/latest/download/GeigerApp.exe>**
+
+1. Pobierz plik (może być na dowolnym komputerze, także na Macu) i skopiuj na komputer
+   z Windowsem 10/11 (64-bit), np. do `C:\GeigerApp`.
+2. Ikonka: prawy klik na `GeigerApp.exe` → *Pokaż więcej opcji* → *Wyślij do → Pulpit (utwórz skrót)*.
+3. Przy pierwszym uruchomieniu Windows może pokazać „System Windows ochronił ten komputer”:
+   *Więcej informacji → Uruchom mimo to* (program nie ma podpisu cyfrowego).
+
+Do pracy z kartą komputer musi mieć **sterownik NI-DAQmx** (krok 1 poniżej). Bez niego program
+działa w trybie symulatora. Plik `.exe` buduje się automatycznie na GitHubie po każdej zmianie
+w gałęzi `main` (zakładka *Actions*, wszystkie wersje w zakładce *Releases*).
+
+Plik `.exe` działa na każdym koncie Windows. Gdy z komputera korzysta kilka osób, wrzuć go
+do folderu poza `C:\Users\...` (np. `C:\GeigerApp`), a każdy zrobi sobie skrót na pulpicie.
 
 ## Instalacja krok po kroku (Windows)
 
@@ -124,7 +149,7 @@ Ręcznie, bez skryptu:
 
 ```
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name GeigerApp --icon assets\geiger.ico --add-data "assets\geiger.png;assets" --collect-all nidaqmx geiger_gui.py
+python -m PyInstaller --onefile --windowed --name GeigerApp --icon assets\geiger.ico --add-data "assets\geiger.png;assets" --collect-all nidaqmx --recursive-copy-metadata nidaqmx geiger_gui.py
 ```
 
 ## Podłączenie sygnału
@@ -141,34 +166,43 @@ sonda GM  ->  zasilacz WN + wzmacniacz/dyskryminator  ->  NI USB-6210: PFI 0 (sy
 ## Jak używać
 
 Instrukcja typowego ćwiczenia jest w programie: klawisz **F1** albo przycisk *Instrukcja (F1)*.
-W skrócie:
+Przycisk **START** (i **SPACJA**) uruchamia to, co jest w otwartej zakładce:
 
-| Zakładka | Do czego |
+| Zakładka | START robi |
 |---|---|
-| Pomiar | pojedynczy pomiar (na czas albo do N impulsów), wybór rodzaju: Pojedynczy / Seria / Zanik |
-| Seria | liczba pomiarów i przerwa, tabela wyników |
+| Pomiar | zwykły pomiar: na czas albo do N impulsów |
+| Seria | kilka pomiarów pod rząd (każdy jak w zakładce Pomiar), tabela wyników |
 | Statystyka | histogram zliczeń, porównanie z rozkładem Poissona, test χ² |
-| Plateau | CPS przy kolejnych napięciach WN (napięcie ustawiasz ręcznie na zasilaczu) |
-| Zanik | t½ z serii pomiarów (np. Ba-137m); tło wypełnia się samo po „Zapamiętaj jako tło” |
-| Czas martwy | metoda dwóch źródeł: źródło 1 → oba → źródło 2 |
-| Urządzenie | wykryte karty, licznik i wejście PFI, symulator, czas martwy τ |
-| Zapis | plik CSV z pomiarami |
+| Plateau | punkt CPS przy napięciu WN ustawionym ręcznie na zasilaczu; pole napięcia przesuwa się o krok |
+| Zanik | seria z własnymi parametrami i dopasowaniem t½ (np. Ba-137m) |
+| Czas martwy | następny krok metody dwóch źródeł: źródło 1 → oba → źródło 2 |
+| Urządzenie, Zapis | zwykły pomiar (jak w zakładce Pomiar) |
+
+W zakładce **Urządzenie** są wykryte karty, licznik i wejście PFI, symulator i czas martwy τ.
+W zakładce **Zapis** wybierasz plik CSV.
 
 Typowa kolejność: **tło** (300–500 s, bez źródła) → *Zapamiętaj jako tło* → **źródło**
 → odczytaj *CPS netto*.
 
+Gdy u góry okna jest **żółty pasek „TRYB SYMULATORA”**, zliczenia są losowane, a nie
+mierzone. Symulator wyłączasz w zakładce Urządzenie.
+
 ## Pliki wynikowe
 
 Pliki CSV otwierają się bezpośrednio w Excelu (polskie ustawienia): separator `;`,
-przecinek dziesiętny, pierwsza linia `sep=;`. Linie zaczynające się od `#` opisują pomiar
-(data, tryb, zapisane tło, wynik dopasowania itp.).
+przecinek dziesiętny, pierwsza linia `sep=;`. Linie zaczynające się od `#` opisują pomiar:
+numer i rodzaj, źródło danych (karta albo **SYMULATOR**), ustawienia, zapisane tło
+i **linia `# wynik`** z N, t, CPS (i CPS netto) na końcu każdego pomiaru.
 
 | Plik | Kolumny |
 |---|---|
-| pomiary (zakładka Zapis) | `run; t_s; N; sqrtN` (co 0,2 s i na koniec każdego pomiaru) |
+| pomiary (zakładka Zapis) | `pomiar; nr_w_serii; t_s; N; sqrtN` (narastająco co 0,2 s i na koniec pomiaru; `pomiar` to kolejny numer w pliku, `nr_w_serii` = 0 poza seriami) |
 | histogram | `przedzial; N` oraz tabela `N; liczba_przedzialow; oczekiwane_Poisson` |
-| plateau | `U_V; N; t_s; CPS; err_CPS` |
-| zanik | `t_mid_s; N; t_pomiaru_s; CPS; err_CPS; CPS_netto` |
+| plateau | `U_V; N; t_s; CPS; u_CPS; w_plateau` + zakres plateau, nachylenie i napięcie pracy |
+| zanik | `t_mid_s; N; t_pomiaru_s; CPS; err_CPS; CPS_netto` + t½ i λ z niepewnością |
+
+Plik CSV może być otwarty w Excelu, ale przed kolejnym pomiarem zamknij go w Excelu,
+bo Windows blokuje zapis do otwartego pliku. Program wtedy poprosi o zamknięcie.
 
 ## Rozwiązywanie problemów
 
@@ -205,6 +239,7 @@ geiger_gui.py            program
 requirements.txt         paczki potrzebne do uruchomienia
 requirements-dev.txt     + pytest i PyInstaller (testy, budowanie .exe)
 build_exe.bat            budowanie dist\GeigerApp.exe
+.github/workflows/       automatyczne testy i budowanie .exe na GitHubie (wydania w Releases)
 assets/                  ikona programu (.ico dla pliku .exe, .png dla okna)
 docs/                    zrzuty ekranu do tego pliku
 tests/                   testy (pytest) i atrapa paczki nidaqmx
