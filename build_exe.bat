@@ -42,6 +42,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed ^
     --icon "assets\geiger.ico" ^
     --add-data "assets\geiger.png;assets" ^
     --collect-all nidaqmx ^
+    --recursive-copy-metadata nidaqmx ^
     geiger_gui.py
 if errorlevel 1 (
     echo [BLAD] Budowanie nie powiodlo sie - zobacz komunikaty powyzej.

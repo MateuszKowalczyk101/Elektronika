@@ -149,7 +149,7 @@ Ręcznie, bez skryptu:
 
 ```
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name GeigerApp --icon assets\geiger.ico --add-data "assets\geiger.png;assets" --collect-all nidaqmx geiger_gui.py
+python -m PyInstaller --onefile --windowed --name GeigerApp --icon assets\geiger.ico --add-data "assets\geiger.png;assets" --collect-all nidaqmx --recursive-copy-metadata nidaqmx geiger_gui.py
 ```
 
 ## Podłączenie sygnału

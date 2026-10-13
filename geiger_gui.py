@@ -65,11 +65,13 @@ try:
     from nidaqmx.constants import Edge
     from nidaqmx.system import System
     NIDAQ_AVAILABLE = True
-except Exception:
+    NIDAQ_IMPORT_ERROR = ""
+except Exception as _e:
     nidaqmx = None
     Edge = None
     System = None
     NIDAQ_AVAILABLE = False
+    NIDAQ_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 
 
 def _fmt_pl(x: float, digits: int = 3) -> str:
@@ -2409,7 +2411,9 @@ class DAQCounterApp(tk.Tk):
     def _scan_counter_channels(self):
         """Zwraca (lista kanalow licznika np. 'Dev1/ctr0', opis dla uzytkownika, czy_blad)."""
         if not NIDAQ_AVAILABLE:
-            return [], "NI-DAQ: brak paczki nidaqmx w tym Pythonie (symulator).", True
+            if "No module named 'nidaqmx'" in NIDAQ_IMPORT_ERROR:
+                return [], "NI-DAQ: brak paczki nidaqmx w tym Pythonie (symulator).", True
+            return [], f"NI-DAQ: paczka nidaqmx nie dziala ({NIDAQ_IMPORT_ERROR}) - symulator.", True
         try:
             devices = list(System.local().devices)
         except Exception as e:
@@ -3309,8 +3313,15 @@ if __name__ == "__main__":
     smoke_file = os.environ.get("GEIGERAPP_SMOKE_TEST")
     if smoke_file:
         def _smoke_done():
+            daq = "-"
+            if NIDAQ_AVAILABLE:
+                try:   # bez sterownika NI (serwer GitHuba) oczekiwany jest DaqNotFoundError
+                    list(System.local().devices)
+                    daq = "ok"
+                except Exception as e:
+                    daq = type(e).__name__
             with open(smoke_file, "w", encoding="utf-8") as f:
-                f.write(f"ok nidaqmx={int(NIDAQ_AVAILABLE)}\n")
+                f.write(f"ok nidaqmx={int(NIDAQ_AVAILABLE)} daq={daq} {NIDAQ_IMPORT_ERROR}\n")
             app.on_close()
         app.after(3000, _smoke_done)
     app.mainloop()

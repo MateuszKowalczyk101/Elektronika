@@ -41,7 +41,8 @@ jobs:
           if (-not (Test-Path $out)) { throw "GeigerApp.exe nie zapisal wyniku testu startu" }
           $res = Get-Content $out
           Write-Host "Wynik testu startu: $res"
-          if ($res -notmatch "nidaqmx=1") { throw "W GeigerApp.exe brakuje paczki nidaqmx" }
+          if ($res -notmatch "nidaqmx=1") { throw "W GeigerApp.exe nie dziala paczka nidaqmx" }
+          if ($res -match "ModuleNotFoundError|ImportError|PackageNotFoundError") { throw "W GeigerApp.exe brakuje czesci paczek" }
 
       - name: GeigerApp.exe do pobrania (gałąź robocza)
         if: github.ref != 'refs/heads/main'
